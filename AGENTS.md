@@ -189,23 +189,35 @@ print(f"Connected to node: {node_ip}")
 
 Before converting, analyze your script to identify:
 
-1. **Parallelizable Operations**
+1. **Desired Output Analysis**
+   - **CRITICAL**: Analyze what the script is supposed to produce
+   - Identify expected return values, output files, or state changes
+   - Determine success criteria (what indicates the script worked correctly?)
+   - **Ask the developer to confirm**: "Based on the script, I understand it should produce [X]. Is this correct?"
+   - Document the expected output for testing purposes
+   - Example questions to ask:
+     - What should the script return or output?
+     - What files should be created?
+     - What state changes should occur?
+     - What indicates successful execution?
+
+2. **Parallelizable Operations**
    - Loops that can run independently
    - Data processing that can be split
    - Independent function calls
    - Batch operations
 
-2. **Stateful vs Stateless Components**
+3. **Stateful vs Stateless Components**
    - Stateless: Functions that don't modify external state → Use `@ray.remote` tasks
    - Stateful: Classes/objects that maintain state → Use `@ray.remote` actors
 
-3. **Resource Requirements**
+4. **Resource Requirements**
    - CPU-intensive operations → Specify `num_cpus`
    - GPU operations → Specify `num_gpus`
    - Memory requirements → Specify `memory` resource
    - Custom resources needed
 
-4. **Data Dependencies and Flow**
+5. **Data Dependencies and Flow**
    - Data that needs to be shared → Use `ray.put()` and object refs
    - Large data passed to multiple tasks → Use object refs to avoid duplication
    - Data locality requirements
@@ -600,6 +612,80 @@ python submit_job.py
 - [Job Submission](resources/cluster/running-applications/job-submission.md)
 - [Kubernetes Deployment](resources/cluster/kubernetes.md)
 
+### Step 7: Create Minimalist Tests
+
+**Purpose**: Create basic tests to verify the rayified script works and produces the desired output. These are NOT production-grade tests - just simple validation that the script runs correctly.
+
+#### Testing Philosophy
+
+- **Minimalist Approach**: Simple, fast tests that verify basic functionality
+- **Local Execution**: Tests run locally using `ray.init()` (no cluster needed)
+- **Minimal Data**: Use tiny datasets (10-100 items instead of millions)
+- **Reduced Iterations**: 1-2 iterations/epochs instead of full training
+- **Output Validation**: Verify the script produces the expected output confirmed in Step 1
+
+#### Test Structure
+
+Create a `tests/` directory in `output/` with:
+
+1. **Basic Connectivity Test**
+   - Verify Ray initializes
+   - Verify script imports without errors
+   - Verify cluster connection works (if RAY_ADDRESS set)
+
+2. **Core Functionality Test**
+   - Run the main script logic with minimal data
+   - Verify it produces the expected output (from Step 1)
+   - Check for basic errors (timeouts, exceptions, wrong outputs)
+
+3. **Ray Primitives Test**
+   - Verify tasks/actors execute correctly
+   - Verify data flows through Ray primitives
+   - Check object references work
+
+#### Test Requirements
+
+- **Fast**: Tests should complete in < 30 seconds total
+- **Simple**: No complex mocking or fixtures needed
+- **Clear**: Each test clearly shows what it's checking
+- **Isolated**: Tests don't depend on each other
+- **Verifiable**: Expected outputs are explicit and checkable
+
+#### Example Test Approach
+
+For a script that processes files and returns results:
+
+```python
+# Test: Verify script processes minimal data and returns expected format
+# Expected output: List of processed results matching input count
+# Minimal data: 3 test files instead of full dataset
+```
+
+For a training script:
+
+```python
+# Test: Verify training setup works with 1 epoch, minimal data
+# Expected output: Model trains without errors, returns metrics
+# Minimal data: 10 samples instead of full dataset
+```
+
+#### Verification Strategy
+
+1. **Run Tests Locally**: `pytest tests/ -v` should show all tests passing
+2. **Check Output**: Verify actual output matches expected output from Step 1
+3. **No Errors**: Script should run without exceptions or timeouts
+4. **Clean State**: Ray should clean up properly after tests
+
+#### What NOT to Test
+
+- Don't test full-scale performance
+- Don't test with production-sized data
+- Don't create complex test infrastructure
+- Don't test edge cases extensively
+- Don't aim for high code coverage
+
+**Goal**: Just verify the script works correctly with minimal data and produces the expected output.
+
 ---
 
 ## 4. Reference Sections by Use Case
@@ -954,15 +1040,19 @@ results = ray.get([compute_task.remote(i) for i in range(100)])
 
 ### Conversion Steps
 
+- [ ] Analyze desired output and confirm with developer
 - [ ] Set up cluster connection via `RAY_ADDRESS`
 - [ ] Choose appropriate Ray primitive (Task/Actor/Library)
 - [ ] Apply resource specifications
 - [ ] Use object refs for large shared data
 - [ ] Configure runtime environment
 - [ ] Add error handling and retries
+- [ ] Create minimalist tests to verify script works and produces expected output
 
 ### Post-Conversion Optimization
 
+- [ ] Run minimalist tests locally - all tests should pass
+- [ ] Verify script produces expected output (from Step 1)
 - [ ] Verify cluster connection works
 - [ ] Check resource utilization
 - [ ] Optimize memory usage (use `ray.put()` for large objects)
