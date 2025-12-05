@@ -37,12 +37,13 @@ rayify/
 4. **Set environment variables** before running:
    ```bash
    export RAY_ADDRESS="ray://your-cluster:10001"
+   export RAY_NAMESPACE="production"  # Required
    ```
 
 ## Key Features
 
 - **Cluster-First Approach**: All conversions assume connecting to an existing Ray cluster
-- **Environment Variable Configuration**: Minimal setup using `RAY_ADDRESS`
+- **Environment Variable Configuration**: Minimal setup using `RAY_ADDRESS` and `RAY_NAMESPACE` (required)
 - **Comprehensive Patterns**: Design patterns and anti-patterns for optimal performance
 - **Use Case Examples**: Reference sections for data processing, training, tuning, serving, and more
 - **Complete Documentation**: Full Ray API references and examples
@@ -52,7 +53,7 @@ rayify/
 1. **Input**: Drop your original Python script into `input/`
 2. **Conversion**: Use AGENTS.md to guide the conversion process
 3. **Output**: The rayified script goes into `output/`
-4. **Execution**: Run the output script with `RAY_ADDRESS` set
+4. **Execution**: Run the output script with `RAY_ADDRESS` and `RAY_NAMESPACE` set
 
 
 

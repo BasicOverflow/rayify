@@ -18,6 +18,7 @@ This guide helps coding agents convert Python scripts into Ray-optimized, cluste
 - Ray installed: `pip install "ray[default]"`
 - Access to a Ray cluster (cluster address)
 - `RAY_ADDRESS` environment variable set
+- `RAY_NAMESPACE` environment variable set (required)
 
 ## Project Structure and Workflow
 
@@ -70,10 +71,11 @@ Configure these environment variables before running your script:
   - Or: `auto` (connects to existing local cluster)
   - Example: `export RAY_ADDRESS="ray://cluster.example.com:10001"`
 
-#### Optional Variables
-
-- **`RAY_NAMESPACE`**: Logical grouping of jobs and actors
+- **`RAY_NAMESPACE`**: Logical grouping of jobs and actors (REQUIRED)
   - Example: `export RAY_NAMESPACE="production"`
+  - Must be set for all Ray connections
+
+#### Optional Variables
 
 - **`RAY_RUNTIME_ENV`**: JSON string for runtime environment
   - Example: `export RAY_RUNTIME_ENV='{"pip": ["numpy", "pandas"], "env_vars": {"MY_VAR": "value"}}'`
@@ -91,35 +93,28 @@ See [Environment Variables Reference](#9-environment-variables-reference) for co
 
 ### Standard Connection Pattern
 
-Minimal connection pattern:
+**REQUIRED**: All connections must use a namespace. Minimal connection pattern:
 
 ```python
 import os
 import ray
 
-# Connect to cluster using address from environment variable
+# Get required cluster address and namespace from environment variables
 cluster_address = os.getenv("RAY_ADDRESS", "auto")
-ray.init(address=cluster_address)
+namespace = os.getenv("RAY_NAMESPACE")
+
+if not namespace:
+    raise ValueError(
+        "RAY_NAMESPACE environment variable is required. "
+        "Set it to a namespace name (e.g., production, development)"
+    )
+
+# Connect to cluster with namespace
+ray.init(address=cluster_address, namespace=namespace)
 
 # Verify connection
 if not ray.is_initialized():
     raise RuntimeError("Failed to connect to Ray cluster")
-```
-
-With optional namespace:
-
-```python
-import os
-import ray
-
-cluster_address = os.getenv("RAY_ADDRESS", "auto")
-namespace = os.getenv("RAY_NAMESPACE")
-
-init_kwargs = {"address": cluster_address}
-if namespace:
-    init_kwargs["namespace"] = namespace
-
-ray.init(**init_kwargs)
 ```
 
 ### Error Handling for Cluster Connection
@@ -131,6 +126,7 @@ import sys
 
 def connect_to_cluster():
     cluster_address = os.getenv("RAY_ADDRESS")
+    namespace = os.getenv("RAY_NAMESPACE")
     
     if not cluster_address:
         raise ValueError(
@@ -138,13 +134,19 @@ def connect_to_cluster():
             "Set it to your cluster address (e.g., ray://head-node:10001)"
         )
     
+    if not namespace:
+        raise ValueError(
+            "RAY_NAMESPACE environment variable is required. "
+            "Set it to a namespace name (e.g., production, development)"
+        )
+    
     try:
-        ray.init(address=cluster_address)
+        ray.init(address=cluster_address, namespace=namespace)
         if not ray.is_initialized():
             raise RuntimeError("Ray initialization failed")
         return True
     except Exception as e:
-        print(f"Failed to connect to cluster at {cluster_address}: {e}", file=sys.stderr)
+        print(f"Failed to connect to cluster at {cluster_address} with namespace {namespace}: {e}", file=sys.stderr)
         sys.exit(1)
 
 # Use in your script
@@ -264,7 +266,10 @@ Is your workload...
 import ray
 import os
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 @ray.remote
 def process_item(item):
@@ -290,7 +295,10 @@ results = ray.get([process_item.remote(i) for i in items])
 import ray
 import os
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 @ray.remote
 class Counter:
@@ -520,6 +528,7 @@ else:
 
 ray.init(
     address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE"),
     runtime_env=runtime_env
 )
 ```
@@ -539,7 +548,11 @@ runtime_env = {
     "working_dir": "https://github.com/user/repo/archive/main.zip"
 }
 
-ray.init(address=os.getenv("RAY_ADDRESS"), runtime_env=runtime_env)
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE"),
+    runtime_env=runtime_env
+)
 ```
 
 **References:**
@@ -602,7 +615,10 @@ import os
 import ray
 import ray.data
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 # Create dataset
 ds = ray.data.range(1000)
@@ -645,7 +661,10 @@ import ray
 from ray.train import ScalingConfig
 from ray.train.torch import TorchTrainer
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 def train_func():
     # Training logic
@@ -681,7 +700,10 @@ import ray
 from ray import tune
 from ray.train import ScalingConfig
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 def trainable(config):
     # Training with hyperparameters
@@ -715,7 +737,10 @@ import os
 from ray import serve
 from fastapi import FastAPI
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 app = FastAPI()
 
@@ -752,7 +777,10 @@ import os
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 config = (
     PPOConfig()
@@ -777,7 +805,10 @@ Use Ray Core primitives (tasks, actors, objects) for custom distributed workload
 import os
 import ray
 
-ray.init(address=os.getenv("RAY_ADDRESS"))
+ray.init(
+    address=os.getenv("RAY_ADDRESS"),
+    namespace=os.getenv("RAY_NAMESPACE")
+)
 
 @ray.remote(num_cpus=2)
 def compute_task(data):
@@ -966,7 +997,7 @@ results = ray.get([compute_task.remote(i) for i in range(100)])
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `RAY_ADDRESS` | Cluster address (required) | `ray://head-node:10001` or `http://head-node:8265` |
-| `RAY_NAMESPACE` | Logical grouping namespace (optional) | `production` or `development` |
+| `RAY_NAMESPACE` | Logical grouping namespace (required) | `production` or `development` |
 
 ### Runtime Environment Variables
 
@@ -1014,7 +1045,12 @@ import ray
 
 # 1. Connect to cluster
 cluster_address = os.getenv("RAY_ADDRESS", "auto")
-ray.init(address=cluster_address)
+namespace = os.getenv("RAY_NAMESPACE")
+
+if not namespace:
+    raise ValueError("RAY_NAMESPACE environment variable is required")
+
+ray.init(address=cluster_address, namespace=namespace)
 
 # 2. Verify connection
 if not ray.is_initialized():
