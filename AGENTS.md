@@ -14,7 +14,6 @@ This guide helps coding agents convert Python scripts into Ray-optimized, cluste
 
 ## Prerequisites
 
-- Python 3.7+
 - Ray installed: `pip install "ray[default]"`
 - Access to a Ray cluster (cluster address)
 - `RAY_ADDRESS` environment variable set
@@ -686,6 +685,88 @@ For a training script:
 
 **Goal**: Just verify the script works correctly with minimal data and produces the expected output.
 
+### Step 8: Containerization (Optional - for Long-Running Scripts)
+
+**Purpose**: Create Dockerfile and docker-compose.yml for scripts that need to run indefinitely or for extended periods on a VM.
+
+#### Containerization Approach
+
+1. **Template-Based Generation**
+   - Use base templates for Dockerfile and docker-compose.yml
+   - Customize based on script requirements
+   - Place both files in `output/` directory
+
+2. **Dockerfile Structure**
+   - Base image with Python and Ray
+   - Install dependencies from requirements.txt
+   - Copy rayified script
+   - Set entrypoint to run the script
+
+3. **Docker Compose Configuration**
+   - Service definition for the script
+   - Environment variables (RAY_ADDRESS, RAY_NAMESPACE, etc.)
+   - Resource limits (CPU, memory)
+   - Restart policy (unless-stopped or on-failure)
+   - Volume mounts if script needs data persistence
+
+4. **Environment Variables**
+   - Inject cluster connection via environment
+   - Application-specific configuration
+   - Use .env file or docker-compose environment section
+
+#### Output Structure
+
+```
+output/
+├── my_script.py          # Rayified script
+├── Dockerfile            # Container definition
+├── docker-compose.yml    # Compose configuration
+└── requirements.txt      # Python dependencies
+```
+
+#### Agent Workflow
+
+1. **Analyze Script Requirements**
+   - Identify dependencies (pip packages)
+   - Determine resource needs (CPU, memory)
+   - Check for file I/O or data persistence needs
+
+2. **Generate Dockerfile**
+   - Start from Python base image
+   - Install Ray and dependencies
+   - Copy script and set entrypoint
+
+3. **Generate docker-compose.yml**
+   - Configure service with resource limits
+   - Set restart policy
+   - Configure environment variables
+   - Add volumes if needed
+
+#### Key Configuration Points
+
+**Dockerfile:**
+- Base image (Python version)
+- Ray installation
+- Dependencies installation
+- Script copying
+- Entrypoint command
+
+**docker-compose.yml:**
+- Service name
+- Resource limits (cpus, memory)
+- Restart policy
+- Environment variables
+- Volume mounts (if needed)
+
+#### Example Structure
+
+The generated files should be minimal and focused:
+- **Dockerfile**: Builds container with script and dependencies
+- **docker-compose.yml**: Orchestrates container with proper configuration
+- Both files reference environment variables for cluster connection
+
+**Note**: This is for containerization only. Deployment to VMs is handled separately by copying files and running `docker-compose up -d` on the target VM.
+
 ---
 
 ## 4. Reference Sections by Use Case
@@ -1048,6 +1129,7 @@ results = ray.get([compute_task.remote(i) for i in range(100)])
 - [ ] Configure runtime environment
 - [ ] Add error handling and retries
 - [ ] Create minimalist tests to verify script works and produces expected output
+- [ ] Generate Dockerfile and docker-compose.yml in output/ (if script needs to run indefinitely)
 
 ### Post-Conversion Optimization
 
