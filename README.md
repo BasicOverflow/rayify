@@ -54,33 +54,7 @@ rayify/
 3. **Output**: The rayified script goes into `output/`
 4. **Execution**: Run the output script with `RAY_ADDRESS` set
 
-## Environment Variables
 
-The minimal required environment variable:
-- `RAY_ADDRESS`: Cluster address (e.g., `ray://head-node:10001`)
-
-Optional variables:
-- `RAY_NAMESPACE`: Logical grouping namespace
-- `RAY_RUNTIME_ENV`: JSON string for runtime environment
-- `RAY_JOB_CONFIG`: JSON string for job configuration
-
-### Setting Environment Variables
-
-1. **Copy the example file**:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Edit `.env`** with your cluster details (this file is gitignored and won't be committed)
-
-3. **Load the environment variables**:
-   ```bash
-   # On Linux/Mac
-   export $(cat .env | xargs)
-   
-   # Or use a tool like python-dotenv
-   pip install python-dotenv
-   ```
 
 See [AGENTS.md](AGENTS.md) for complete environment variable reference.
 
@@ -93,51 +67,6 @@ See [AGENTS.md](AGENTS.md) for complete environment variable reference.
   - API references
   - Examples for all Ray libraries
 
-## Branch Strategy
 
-**Important**: Different branches from `main` represent different instances of this project. Each branch may have:
-- Different versions of the conversion guide
-- Different resource documentation
-- Different project configurations
-- Different conversion strategies
-
-Always check which branch you're working with and ensure you're using the correct version of the guide and resources for your specific use case.
-
-## Prerequisites
-
-- Python 3.7+
-- Ray installed: `pip install "ray[default]"`
-- Access to a Ray cluster (cluster address)
-- `RAY_ADDRESS` environment variable set
-
-## Quick Start
-
-1. Clone this repository
-2. Place your script in `input/`
-3. Follow the conversion guide in `AGENTS.md`
-4. Generate the rayified script in `output/`
-5. Set `RAY_ADDRESS` and run the output script
-
-## Design Patterns
-
-This project references Ray's official design patterns:
-- [Ray Core Patterns](https://docs.ray.io/en/latest/ray-core/patterns/index.html)
-- All patterns are documented in `resources/ray-core/patterns/`
-
-## Contributing
-
-When working with this repository:
-- Use `input/` for original scripts
-- Use `output/` for converted scripts
-- Follow the guidelines in `AGENTS.md`
-- Reference resources in `resources/` directory
-
-## Additional Resources
-
-- [Ray Documentation](https://docs.ray.io/)
-- [Ray GitHub](https://github.com/ray-project/ray)
-- [AGENTS.md](AGENTS.md) - Complete conversion guide
-
----
 
 **Note**: This repository is designed to guide coding agents in performing conversions, not to automate the conversion process. The conversion is a manual process guided by the comprehensive resources and instructions provided.

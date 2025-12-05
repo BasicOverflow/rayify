@@ -19,6 +19,25 @@ This guide helps coding agents convert Python scripts into Ray-optimized, cluste
 - Access to a Ray cluster (cluster address)
 - `RAY_ADDRESS` environment variable set
 
+## Project Structure and Workflow
+
+### Input/Output Directories
+
+This repository uses a simple workflow for script conversion:
+
+- **`input/`**: Place the original Python script(s) to be converted here
+- **`output/`**: Write the converted Ray-optimized script(s) here
+
+**Workflow:**
+1. Original script is placed in `input/` directory
+2. Agent reads script from `input/` and converts it using this guide
+3. Converted script is written to `output/` directory
+4. Converted script connects to Ray cluster via `RAY_ADDRESS` environment variable
+
+**Example:**
+- Input: `input/my_script.py` (original Python script)
+- Output: `output/my_script.py` (Ray-optimized version)
+
 ## Resource Directory Structure
 
 This guide references documentation in the `resources/` directory:
