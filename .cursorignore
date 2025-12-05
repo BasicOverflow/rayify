@@ -1,0 +1,3 @@
+# Ignore scraper script - not part of agent conversion process
+resources/scrape_ray_docs.py
+
