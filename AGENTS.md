@@ -11,11 +11,29 @@ Convert Python scripts in `input/` into Ray-optimized, cluster-ready code in `ou
 ## Hard rules
 
 - Cluster-first: `ray.init` via env vars, not implicit local Ray
-- Required env: `RAY_ADDRESS`, `RAY_NAMESPACE`. Optional: `RAY_RUNTIME_ENV` (JSON)
-- **One namespace per project** — every rayified project gets its own `RAY_NAMESPACE` (unique name for that project). Do not share a namespace across unrelated projects/jobs/actors. Document the chosen namespace (e.g. in output or `.env` notes for that project)
-- Read original from `input/`; write converted script(s) to `output/`
-- Confirm expected output with the user before converting
-- Specify resource minimum needs on remotes (`num_cpus`, `num_gpus`, `memory`, etc.) if needed or when non-trivial (assuming approval received from dev after making a case for the need of defining resource needs)
+- Required: `RAY_ADDRESS`, `RAY_NAMESPACE` from repo-root [`.env`](.env) (key names in [`.env.example`](.env.example)). Optional: `RAY_RUNTIME_ENV` (JSON)
+- **Root `.env` required** — if missing, stop; tell the user to add a filled copy. Never invent hosts/creds; never hardcode secrets
+- **One namespace per project** — unique `RAY_NAMESPACE`; document it for that project
+- Read from `input/`; write to `output/`; confirm expected output before converting
+- **Backends from `.env`:** treat listed services (Ray, MinIO/S3, Postgres, Mongo, Neo4j, SearXNG, Gitea, …) as a shared toolbox — use any of them for **any project-appropriate role** (not only “S3=blobs / SQL=tables”); keys in [`.env.example`](.env.example) are endpoints/creds, not fixed recipes. Prefer fitting what’s already there; if the job needs persistence or a new dedicated DB/bucket/instance, ask once (reuse vs dedicated), recommend, wait for yes, then update root `.env`. Wire only via env; propagate needed vars to workers via `runtime_env`. **If something needs manual setup the agent can’t do** (new Postgres/Mongo/Neo4j DB or instance, MinIO bucket, Gitea package index/org, registry image, etc.), **stop and point it out to the dev as a requirement** before coding that path — don’t pretend it’s already provisioned
+- Resource hints on remotes when non-trivial (after user approves)
+
+## Ray Hive (LLM serving)
+
+Ray Hive is a distributed LLM serving SDK for a Ray cluster on k3s. It deploys vLLM models across heterogeneous GPUs with VRAM-aware scheduling, then exposes a simple Python API for inference.
+
+- **When:** project needs LLM inference (especially high-throughput serving), embeddings, multimodal, or any vLLM-supported Hugging Face model
+- **Permission:** if that need is detected, **ask the user before using Ray Hive**; do not deploy models until approved
+- **How:** web-search / open [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) for current API, features, and examples — do not rely on memory alone
+- **Install** (LAN Gitea PyPI — fill from root `.env` `GITEA_USER` / `GITEA_TOKEN` / `GITEA_PYPI_SIMPLE`):
+
+```bash
+pip install ray-hive \
+  --index-url http://<GITEA_USER>:<GITEA_TOKEN>@<gitea-host>:<port>/api/packages/<owner>/pypi/simple/ \
+  --extra-index-url https://pypi.org/simple
+```
+
+Connect with `RAY_ADDRESS` from `.env`.
 
 ## Code style (unslop + clear OOP)
 
@@ -43,13 +61,13 @@ ray.init(
 
 ## Workflow
 
-1. **Analyze** – What should the script produce? Confirm with the user. Note parallelizable work, stateful vs stateless, data sharing, resource needs. Pick a **dedicated project namespace**.
-2. **Examples** – Scan other branches for relevant prior rayify projects if they exist; read those when useful.
-3. **Choose primitive** – Use the table below; open the linked local doc, then confirm vs online Ray docs.
-4. **Implement** – Ray patterns + unslop style (clear OOP where natural). Shared data via `ray.put`, resource hints, concurrency limits.
-5. **Deps / infra** – `runtime_env` / `RAY_RUNTIME_ENV` as needed. Hosts/ports/endpoints via local infra notes or notes MCP.
-6. **Verify** – Smoke script(s) on real cluster/infra, short run, print real results.
-7. **Docker** – Only for long-running scripts: `Dockerfile`, `docker-compose.yml`, `requirements.txt` in `output/` with `RAY_ADDRESS` / `RAY_NAMESPACE`.
+1. **Analyze** – Confirm output; resources; project `RAY_NAMESPACE`. Stop if no root `.env`. Persistence / LLM serving: ask reuse vs dedicated or Ray Hive permission as needed.
+2. **Examples** – Prior rayify branches if useful; read those when useful.
+3. **Choose primitive** – Table below; local doc then online Ray docs.
+4. **Implement** – Ray + unslop; backends only via confirmed env keys.
+5. **Deps** – `runtime_env` / `RAY_RUNTIME_ENV` as needed.
+6. **Verify** – Tiny real-cluster smoke; print a real result.
+7. **Docker** – Long-running only: `Dockerfile`, compose, `requirements.txt` in `output/`.
 
 ## Smoke tests (not pytest scaffolding)
 
