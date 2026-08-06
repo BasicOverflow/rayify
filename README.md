@@ -5,8 +5,9 @@ A repository for converting Python scripts into Ray-optimized, cluster-ready cod
 ## Overview
 
 This repository contains:
-- **AGENTS.md**: Comprehensive guide for coding agents to convert scripts to Ray
-- **resources/**: Complete Ray documentation organized by topic
+- **AGENTS.md**: Guide for coding agents to convert scripts to Ray
+- **ray-resources/**: Ray documentation organized by topic
+- **unslop-examples/**: Side-by-side AI-slop vs clean code (style bible for generated code)
 - **input/**: Drop your original Python scripts here
 - **output/**: Rayified versions of your scripts will be placed here
 
@@ -16,17 +17,11 @@ This repository contains:
 rayify/
 ├── input/              # Place your original Python scripts here
 ├── output/             # Rayified scripts will be generated here
-├── resources/          # Ray documentation and examples
-│   ├── ray-core/      # Core Ray concepts (tasks, actors, objects)
-│   ├── data/          # Ray Data for batch processing
-│   ├── train/         # Ray Train for distributed training
-│   ├── tune/          # Ray Tune for hyperparameter tuning
-│   ├── serve/         # Ray Serve for model serving
-│   └── cluster/       # Cluster deployment guides
-├── .env.example       # Example environment variables file
-├── .env                # Your local environment variables (gitignored)
+├── ray-resources/     # Ray documentation and examples
+├── unslop-examples/   # AI-slop vs clean pairs (code style)
+├── .env.example
 ├── AGENTS.md          # Main conversion guide for coding agents
-└── README.md          # This file
+└── README.md
 ```
 
 ## How to Use
@@ -61,12 +56,9 @@ See [AGENTS.md](AGENTS.md) for complete environment variable reference.
 
 ## Resources
 
-- **AGENTS.md**: Main conversion guide with step-by-step instructions
-- **resources/**: Comprehensive Ray documentation
-  - Core concepts: tasks, actors, objects, scheduling
-  - Design patterns and anti-patterns
-  - API references
-  - Examples for all Ray libraries
+- **AGENTS.md**: Conversion guide (Ray + unslop style)
+- **ray-resources/**: Ray API/docs and examples
+- **unslop-examples/**: Anti-slop patterns agents must follow
 
 
 

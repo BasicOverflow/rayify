@@ -1,3 +1,2 @@
-# Ignore scraper script - not part of agent conversion process
-resources/scrape_ray_docs.py
-
+﻿# Ignore scraper script - not part of agent conversion process
+ray-resources/scrape_ray_docs.py
