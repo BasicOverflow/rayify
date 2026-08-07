@@ -8,6 +8,8 @@ Convert Python scripts in `input/` into Ray-optimized, cluster-ready code in `ou
 
 **Prior rayify examples:** list all branches (`git branch -a`); if other branches hold approved real rayified projects, switch/read them when relevant (how connect, actors, tests, layout). Return to the working branch when done. Do not invent from scratch if a branch already solved a similar case.
 
+**Long-running / Prefect:** open [orchestration-patterns/prefect-long-running.md](orchestration-patterns/prefect-long-running.md), then re-verify Prefect online.
+
 ## Hard rules
 
 - Cluster-first: `ray.init` via env vars, not implicit local Ray
@@ -17,6 +19,26 @@ Convert Python scripts in `input/` into Ray-optimized, cluster-ready code in `ou
 - Read from `input/`; write to `output/`; confirm expected output before converting
 - **Backends from `.env`:** treat listed services (Ray, MinIO/S3, Postgres, Mongo, Neo4j, SearXNG, Gitea, …) as a shared toolbox — use any of them for **any project-appropriate role** (not only “S3=blobs / SQL=tables”); keys in [`.env.example`](.env.example) are endpoints/creds, not fixed recipes. Prefer fitting what’s already there; if the job needs persistence or a new dedicated DB/bucket/instance, ask once (reuse vs dedicated), recommend, wait for yes, then update root `.env`. Wire only via env; propagate needed vars to workers via `runtime_env`. **If something needs manual setup the agent can’t do** (new Postgres/Mongo/Neo4j DB or instance, MinIO bucket, Gitea package index/org, registry image, etc.), **stop and point it out to the dev as a requirement** before coding that path — don’t pretend it’s already provisioned
 - Resource hints on remotes when non-trivial (after user approves)
+- **Run mode — confirm with dev** (do not auto-classify): propose short one-shot vs long-running / fault-tolerant from the script shape, then **wait for an explicit choice**. See [Run mode](#run-mode-confirm-with-dev)
+
+## Run mode (confirm with dev)
+
+### Short / one-shot (after dev confirms)
+
+- Convert to Ray as usual; run from the driver/host with root `.env`.
+- Output: `<script>.py`, `smoke_test.py`, `requirements.txt` as needed.
+- No Prefect; no job container/compose unless the dev later asks to package it.
+
+### Long-running / fault-tolerant (after dev confirms)
+
+- Always: Prefect-wrapped entry, Alpine-first `Dockerfile`, `docker-compose.yml` (Prefect server UI + job). Crib: [orchestration-patterns/prefect-long-running.md](orchestration-patterns/prefect-long-running.md).
+- Ask once which **remote** store holds workload progress/checkpoints (MinIO/S3, Postgres, Mongo, Neo4j — reuse vs dedicated from the toolbox). Never host bind-mount recovery for that state.
+- If training/ML or heavy experiment tracking: **ask** whether to wire Weights & Biases (or similar). Only if yes, create **project-local** env keys under `output/` from scratch — never blank Prefect/W&B slots in root [`.env.example`](.env.example).
+- Shared infra: pass root `.env` into the job service. Prefect client→server URL is compose-internal glue only (see crib), not a root template key.
+- Durable orchestration = Prefect (flows, tasks, retries, UI logs). Workload artifacts = chosen remote backend. Ray Train/Tune: their checkpoints into that store when those primitives apply. Do **not** invent a repo-local checkpoint base-class package.
+- Actors are disposable memory; reload progress from remote on restart.
+- No Prometheus/Grafana for this path unless the dev later asks (not default).
+- Prefer `python:3.x-alpine` for the job image; switch only if a dep forces a different slim base.
 
 ## Ray Hive (LLM serving)
 
@@ -61,13 +83,13 @@ ray.init(
 
 ## Workflow
 
-1. **Analyze** – Confirm output; resources; project `RAY_NAMESPACE`. Stop if no root `.env`. Persistence / LLM serving: ask reuse vs dedicated or Ray Hive permission as needed.
-2. **Examples** – Prior rayify branches if useful; read those when useful.
+1. **Analyze** – Confirm expected output; resources; project `RAY_NAMESPACE`. Stop if no root `.env`. **Propose short vs long-running, wait for explicit confirmation.** Then: persistence reuse/dedicated, Ray Hive, and (if long + training) W&B / extra UIs as needed.
+2. **Examples** – Prior rayify branches if useful; if long-running, open [orchestration-patterns/prefect-long-running.md](orchestration-patterns/prefect-long-running.md).
 3. **Choose primitive** – Table below; local doc then online Ray docs.
-4. **Implement** – Ray + unslop; backends only via confirmed env keys.
-5. **Deps** – `runtime_env` / `RAY_RUNTIME_ENV` as needed.
-6. **Verify** – Tiny real-cluster smoke; print a real result.
-7. **Docker** – Long-running only: `Dockerfile`, compose, `requirements.txt` in `output/`.
+4. **Implement** – Ray + unslop; backends only via confirmed env keys. If long: wrap with Prefect (flows/tasks, retries, progress logged in Prefect UI, workload state on remote store).
+5. **Deps** – `runtime_env` / `RAY_RUNTIME_ENV` as needed; long mode also `requirements.txt` with `prefect` (and backend clients).
+6. **Verify** – Tiny real-cluster smoke; print a real result. Long: same path through Prefect + **remote** store proof.
+7. **Package** – Long only: Alpine-first `Dockerfile` + `docker-compose.yml` (Prefect server UI + job). Short: Docker only if the dev asks.
 
 ## Smoke tests (not pytest scaffolding)
 
@@ -83,6 +105,7 @@ Requirements:
 - **Tiny runtime only** — fraction of full load (few items, 1 epoch/step, short timeout, subsample of data). Same code paths, less work.
 - **Print proof it worked** — real result from the cluster/infra (sample output, count, actor reply, write confirmation, etc.), not a silent exit or empty “ok”
 - Fail loudly on errors (raise / non-zero exit); no soft-fail soup
+- **Long mode:** exercise the Prefect entry (or the same tasks) plus a small remote-store read/write on real MinIO/DB, and print proof of both
 
 ## Which docs to open
 
@@ -105,10 +128,12 @@ Always: local path first, then verify against [docs.ray.io](https://docs.ray.io/
 | Model serving | [serve.md](ray-resources/serve.md), [serve/examples.md](ray-resources/serve/examples.md) |
 | Reinforcement learning | [rllib.md](ray-resources/rllib.md) |
 | LLM batch | [ray-resources/llm/](ray-resources/llm/) |
+| Long-running / Prefect | [orchestration-patterns/prefect-long-running.md](orchestration-patterns/prefect-long-running.md) then Prefect online docs |
 | Everything else | [ray-resources/README.md](ray-resources/README.md) |
 
 ```
 Is your workload...
+├─ Confirmed long-running / FT? → orchestration-patterns/prefect-long-running.md  (+ Ray primitive below)
 ├─ Data / batch inference?     → ray-resources/data/
 ├─ Distributed training?       → ray-resources/train/
 ├─ Hyperparameter tuning?      → ray-resources/tune/
@@ -128,11 +153,24 @@ Is your workload...
 
 ## Output layout
 
+**Short / one-shot**
+
 ```
 output/
 ├── <script>.py           # rayified script
 ├── smoke_test.py         # same cluster/infra as prod; tiny run; prints real result
-├── Dockerfile            # optional, long-running
-├── docker-compose.yml
-└── requirements.txt
+└── requirements.txt      # as needed
+```
+
+**Long-running** (after dev confirms)
+
+```
+output/
+├── flow.py               # Prefect entry; calls Ray work
+├── <ray_work>.py         # optional split
+├── smoke_test.py         # Prefect path + remote store + Ray; tiny; prints proof
+├── Dockerfile            # Alpine Python preferred
+├── docker-compose.yml    # prefect-server (UI :4200) + job
+├── .env                  # only project-local keys created for this job if needed
+└── requirements.txt      # prefect + Ray + backend clients used
 ```
