@@ -46,7 +46,8 @@ Ray Hive is a distributed LLM serving SDK for a Ray cluster on k3s. It deploys v
 
 - **When:** project needs LLM inference (especially high-throughput serving), embeddings, multimodal, or any vLLM-supported Hugging Face model
 - **Permission:** if that need is detected, **ask the user before using Ray Hive**; do not deploy models until approved
-- **How:** web-search / open [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) for current API, features, and examples — do not rely on memory alone
+- **How:** web-search / open [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) for current API and features — do not rely on memory alone
+- **Examples (required):** before implementing Hive usage, open and crib from the matching scripts under [ray-hive/examples](https://github.com/BasicOverflow/ray-hive/tree/main/examples) (inference, multimodal, embeddings, allocation, tensor parallel, shared GPU, idle sleep, etc.) — pick the closest example(s) for the workload; do not invent API usage from scratch
 - **Install** (LAN Gitea PyPI — fill from root `.env` `GITEA_USER` / `GITEA_TOKEN` / `GITEA_PYPI_SIMPLE`):
 
 ```bash
@@ -56,6 +57,14 @@ pip install ray-hive \
 ```
 
 Connect with `RAY_ADDRESS` from `.env`.
+
+## Optional: cudf.pandas (GPU pandas)
+
+[cudf.pandas](https://docs.rapids.ai/api/cudf/stable/cudf_pandas/) is NVIDIA’s drop-in GPU accelerator for pandas (`python -m cudf.pandas` / `cudf.pandas.install()` before `import pandas`). Useful when the input does **heavy** DataFrame work (groupby, joins, large CSV/Parquet) that fits on a GPU worker.
+
+- **Ask first** — do not wire RAPIDS/cuDF unless the user agrees; needs CUDA GPUs + cuDF on those workers
+- **Not the default** — prefer plain pandas or [Ray Data](ray-resources/data/examples.md) for distributed/out-of-core; cudf.pandas is single-process acceleration (fine inside a GPU actor/task), not a cluster dataframe layer
+- Skip for tiny frames or non-pandas pipelines
 
 ## Code style (unslop + clear OOP)
 
@@ -67,6 +76,7 @@ Match the cleaned half of [unslop-examples/](unslop-examples/). Index: [unslop-e
 - **No defensive soup** — let bad state raise; no silent `except`, stacked `hasattr`, soft-fail timeouts, or invent-a-fallback deploys ([01](unslop-examples/01-wait-helpers-and-fallbacks.md), [04](unslop-examples/04-inference-defensive-soup.md)).
 - **No print theater / dead paths** — skip section banners, emoji status systems, legacy dual branches, double-checks ([02](unslop-examples/02-legacy-paths-and-double-checks.md), [03](unslop-examples/03-examples-print-theater.md)).
 - **Don’t paper over bad data** — no regex JSON recovery if you control the schema; fail or use real structured output ([05](unslop-examples/05-json-parse-slop.md)).
+- **No compliance / process comments** — do not litter output code with comments that narrate following AGENTS.md, Ray docs, unslop rules, “as required,” “per instructions,” checklist ticks, etc. Comments only when they clarify non-obvious *code* behavior.
 
 ## Connect
 
