@@ -1,0 +1,29 @@
+# Large / binary datasets
+*.parquet
+*.csv
+*.feather
+*.hdf5
+*.h5
+*.arrow
+*.orc
+*.zip
+*.7z
+*.gz
+*.bz2
+*.xz
+*.tar
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets (keys live in .env — copy from .env.example)
+.env
+
+# Unified-schema notebook POC cache
+poc/
