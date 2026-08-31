@@ -203,6 +203,9 @@ cython_debug/
 # Note: .cursorignore is committed to share ignore rules with the team
 .cursorindexingignore
 
+# L1 quality inspection artifacts (inspect_l1.py)
+output/l1_inspect/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
