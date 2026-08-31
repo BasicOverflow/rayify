@@ -6,7 +6,7 @@ A repository for converting Python scripts into Ray-optimized, cluster-ready cod
 
 This repository contains:
 - **AGENTS.md**: Guide for coding agents to convert scripts to Ray
-- **ray-resources/**: Ray documentation organized by topic
+- **ray-docs-index.md**: Curated links to official Ray docs (patterns, libraries, cluster)
 - **unslop-examples/**: Side-by-side AI-slop vs clean code (style bible for generated code)
 - **orchestration-patterns/**: Docker Compose job-container packaging for Ray workloads
 - **input/**: Drop your original Python scripts here
@@ -18,7 +18,7 @@ This repository contains:
 rayify/
 ├── input/                      # Place your original Python scripts here
 ├── output/                     # Rayified scripts will be generated here
-├── ray-resources/              # Ray documentation and examples
+├── ray-docs-index.md           # Curated links to docs.ray.io
 ├── unslop-examples/            # AI-slop vs clean pairs (code style)
 ├── orchestration-patterns/     # Docker Compose job-container crib
 ├── .env.example                # Shared Ray + infra backend key template
@@ -66,7 +66,7 @@ See [AGENTS.md](AGENTS.md) for agent rules. See [`.env.example`](.env.example) f
 
 - **AGENTS.md**: Conversion guide (Ray + unslop + backends + Ray Hive)
 - **.env.example**: Shared Ray/infra env key template (create project-local keys under `output/` when needed)
-- **ray-resources/**: Ray API/docs and examples
+- **ray-docs-index.md**: Ray doc links for agents (web-search the linked pages)
 - **unslop-examples/**: Anti-slop patterns agents must follow
 - **orchestration-patterns/**: Docker Compose + remote-state patterns for packaged jobs
 - **[ray-hive](https://github.com/BasicOverflow/ray-hive)**: Optional LLM serving SDK used on the Ray cluster
