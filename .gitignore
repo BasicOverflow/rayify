@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+!.env.test.example
 .envrc
 .venv
 env/
@@ -203,8 +204,16 @@ cython_debug/
 # Note: .cursorignore is committed to share ignore rules with the team
 .cursorindexingignore
 
-# L1 quality inspection artifacts (inspect_l1.py)
+# Rayify job output artifacts
 output/l1_inspect/
+output/plot_samples/
+output/tmp/
+output/*.log
+output/**/*.log
+output/.supervisor/*
+!output/.supervisor/.gitkeep
+output/.supervisor-test/
+output/output/
 
 # Marimo
 marimo/_static/

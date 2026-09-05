@@ -30,11 +30,7 @@ def main():
     )
 
     tables = pg.fetchall(
-        """
-        SELECT tablename FROM pg_tables
-        WHERE schemaname = 'public'
-        ORDER BY tablename
-        """
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
     )
     names = [r["tablename"] for r in tables]
     print(f"pg: tables={names}")

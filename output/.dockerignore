@@ -1,0 +1,15 @@
+tmp/
+tests/
+docs/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.supervisor/
+*.png
+.env
+.env.*
+*.pyc
+.Python
+README.md
+requirements-dev.txt
+scripts/

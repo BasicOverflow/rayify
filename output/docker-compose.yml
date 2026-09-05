@@ -1,0 +1,15 @@
+services:
+  supervisor:
+    build: .
+    env_file:
+      - ../.env
+    environment:
+      MARKETS_RESET: ${MARKETS_RESET:-}
+      MARKETS_DEV_YF_LIMIT: ${MARKETS_DEV_YF_LIMIT:-}
+      MARKETS_DEV_FRED_LIMIT: ${MARKETS_DEV_FRED_LIMIT:-}
+      EOD_CHUNK_SIZE: ${EOD_CHUNK_SIZE:-}
+      EOD_MAX_IN_FLIGHT: ${EOD_MAX_IN_FLIGHT:-0}
+      EOD_PACE_SECONDS: ${EOD_PACE_SECONDS:-}
+    volumes:
+      - ./.supervisor:/app/.supervisor
+    restart: always

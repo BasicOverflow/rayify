@@ -1,0 +1,1 @@
+"""FRED / ALFRED vintage ingest."""
