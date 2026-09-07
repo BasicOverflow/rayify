@@ -72,3 +72,7 @@ See [AGENTS.md](AGENTS.md) for agent rules. See [`.env.example`](.env.example) f
 - **[ray-hive](https://github.com/BasicOverflow/ray-hive)**: Optional LLM serving SDK used on the Ray cluster
 
 **Note**: This repository is designed to guide coding agents in performing conversions, not to automate the conversion process. The conversion is a manual process guided by the comprehensive resources and instructions provided.
+
+## Credits
+
+Parts of [AGENTS.md](AGENTS.md) were inspired by [CLAUDE.md](https://github.com/jbarbier/CLAUDE.md/blob/main/CLAUDE.md).
