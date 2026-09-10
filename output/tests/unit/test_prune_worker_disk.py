@@ -59,7 +59,7 @@ def test_prune_runtime_resources_never_deletes_packages(tmp_path):
 
 @pytest.mark.unit
 def test_prune_orphan_tmp_dirs_skips_live_and_deletes_dead(tmp_path):
-    from lexis_markets.tmp_scratch import LIVE_MARKER, mark_live, prune_orphan_tmp_dirs
+    from lexis_markets.scratch import LIVE_MARKER, mark_live, prune_orphan_tmp_dirs
 
     live = tmp_path / "lexis-jw-stage-live"
     live.mkdir()
