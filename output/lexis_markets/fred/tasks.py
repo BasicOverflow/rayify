@@ -7,7 +7,7 @@ from uuid import uuid4
 import pandas as pd
 import ray
 
-from lexis_markets.lake import LakeStore, PgClient
+from lexis_markets.lake import LakeStore, PgClient, lake_from_cfg_d, cfg_d_with_scratch
 from lexis_markets.registry import patch_macro_eod_registry, resolve_fred_vintage_jobs
 from lexis_markets.config import MarketsConfig
 from lexis_markets.logging_setup import get_logger
@@ -20,6 +20,7 @@ from lexis_markets.fred.client import (
 )
 from lexis_markets.ray.markets_actors import get_fred_gate_actor
 from lexis_markets.jobs.scheduler import TaskShape, run_batches
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
 
 logger = get_logger("fred.tasks")
 
@@ -136,14 +137,24 @@ def ingest_fred_vintage_job(
     return detail
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def task_ingest_fred_vintage_batch(cfg_d: dict, jobs: list[dict], run_id: str) -> list[dict]:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     gate = get_fred_gate_actor(cfg)
     return [
         ingest_fred_vintage_job(cfg, lake, job, run_id=run_id, rate_gate=gate) for job in jobs
     ]
+
+
+def _fred_fetch_wrote_nothing(series_jobs: list[dict], *, ok: int, rows: int) -> bool:
+    """True when jobs with real vintage dates all wrote zero rows."""
+    fetchable = [
+        j
+        for j in series_jobs
+        if not j.get("empty_after_clamp") and (j.get("vintage_dates") or [])
+    ]
+    return bool(fetchable) and ok == 0 and rows == 0
 
 
 def ingest_fred_vintage_jobs(
@@ -160,7 +171,7 @@ def ingest_fred_vintage_jobs(
     gate = get_fred_gate_actor(cfg)
     series_jobs = _prepare_series_jobs(cfg, jobs, gate)
     preferred = gate_preferred_window_days(gate, cfg.fred_vintage_max_window_days)
-    cfg_d = cfg.to_dict()
+    cfg_d = cfg_d_with_scratch(cfg)
     run_id = uuid4().hex[:12]
     shape = TaskShape(
         batch_size=max(1, cfg.fred_series_per_task),
@@ -199,7 +210,7 @@ def ingest_fred_vintage_jobs(
     rows = sum(int(d.get("rows") or 0) for d in details)
     ok = sum(1 for d in details if int(d.get("rows") or 0) > 0)
     bisects = sum(int(d.get("bisects") or 0) for d in details)
-    if jobs and ok == 0 and rows == 0:
+    if _fred_fetch_wrote_nothing(series_jobs, ok=ok, rows=rows):
         raise RuntimeError(
             f"{label}: {len(jobs)} series scheduled but wrote 0 rows "
             "(check FRED output_type / API response shape); refusing silent empty backfill"

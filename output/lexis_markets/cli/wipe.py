@@ -222,7 +222,14 @@ def main() -> None:
         action="store_true",
         help="Remove FRED/macro L1 + registry only; leave equity/ETF intact",
     )
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required. Without this flag the wipe is a no-op.",
+    )
     args = p.parse_args()
+    if not args.confirm:
+        raise SystemExit("refusing to wipe without --confirm")
     if args.fred_only:
         wipe_fred()
     else:

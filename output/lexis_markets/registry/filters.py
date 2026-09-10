@@ -5,7 +5,7 @@ from datetime import date
 
 from lexis_markets.registry.universe import parse_extras
 
-SERIES_STATUSES = frozenset({"ACTIVE", "DELISTED", "UNSUPPORTED"})
+SERIES_STATUSES = frozenset({"ACTIVE", "DELISTED", "UNSUPPORTED", "BAD_DATA"})
 
 EFFECTIVE_LAST_SEEN_SQL = """
 COALESCE(

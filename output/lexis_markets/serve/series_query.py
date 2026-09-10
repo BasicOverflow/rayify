@@ -15,11 +15,12 @@ from lexis_markets.domain.resample import resample_bars
 from lexis_markets.serve.revision import parse_revision_mode, uses_l3_cache
 from lexis_markets.serve.stitch import stitch_series
 from lexis_markets.logging_setup import get_logger
+from lexis_markets.ray.runtime import IO_REMOTE_OPTS
 
 logger = get_logger("serve.series_query")
 
 
-@ray.remote
+@ray.remote(**IO_REMOTE_OPTS)
 def task_query_series_bars(
     cfg_d: dict,
     series_id: str,

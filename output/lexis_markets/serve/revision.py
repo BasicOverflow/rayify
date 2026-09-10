@@ -6,7 +6,8 @@ from typing import Literal
 
 RevisionMode = Literal["as_of", "latest"]
 
-DEFAULT_REVISION_MODE: RevisionMode = "as_of"
+# Prefer L3 cache for Serve history / datasets / quality rescans (pass as_of for PIT FRED).
+DEFAULT_REVISION_MODE: RevisionMode = "latest"
 
 
 def parse_revision_mode(raw: str | None) -> RevisionMode:

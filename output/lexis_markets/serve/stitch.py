@@ -2,19 +2,24 @@
 
 Stitch policy (single version, no rule table):
   1. Load source rows for a series from L1 via ``stitch_segments`` (alias materialization).
-  2. For each (series_id, ts), pick the row from the highest-priority source in
+  2. Drop jakewright bars in a long identical-close or linear-ramp run when another
+     source disagrees on those dates (halt/copy-forward / synthetic stairs losing to
+     a moving tape).
+  3. For each (series_id, ts), pick the row from the highest-priority source in
      ``SOURCE_PRIORITY`` (lower index wins).
-  3. When the winning source changes and the new segment is marketparquet/yfinance,
-     scale OHLC onto the prior segment using median close ratio over overlap days.
-     Reject the fill if overlap is too short or the ratio is outside calibration bounds.
+  4. When the winning source changes and the new segment is a fill source, scale OHLC
+     onto the prior segment (raw overlap ratio × prior segment scale, or junction chain).
+     Reject the fill if the ratio is outside calibration bounds.
+  5. Collapse interior bars of a long identical-close run (halt / copy-forward) to endpoints.
 
 ``merge_canonical_cache`` prepends/appends stitched spans into the per-series L3 parquet.
 """
 from __future__ import annotations
 
-from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+import math
+import os
 
 import pandas as pd
 
@@ -22,20 +27,26 @@ from lexis_markets.config import (
     CALIBRATION_MAX_RATIO,
     CALIBRATION_MIN_OVERLAP_DAYS,
     CALIBRATION_MIN_RATIO,
+    CALIBRATION_SPLIT_FACTORS,
+    CALIBRATION_SPLIT_TOL,
     FILL_SOURCES,
     PRICE_COLS,
     SOURCE_PRIORITY,
 )
 from lexis_markets.domain.canonical_bar import CANONICAL_BAR_COLUMNS
+from lexis_markets.domain.quality import (
+    FLAT_CLOSE_MIN_RUN,
+    collapse_halt_flats,
+    flat_close_mask,
+    linear_ramp_mask,
+)
 from lexis_markets.fred.alfred import collapse_fred_vintages
 from lexis_markets.serve.revision import RevisionMode, resolve_collapse_as_of
 from lexis_markets.domain.raw_bar import RAW_BAR_COLUMNS
 
 _PRIORITY = {s: i for i, s in enumerate(SOURCE_PRIORITY)}
-
-
-def month_bounds(y: int, m: int) -> tuple[date, date]:
-    return date(y, m, 1), date(y, m, monthrange(y, m)[1])
+# Secondary source must differ by this relative close to unseat a JW flat run.
+JW_FLAT_DISAGREE_REL = 0.02
 
 
 def merge_canonical_cache(existing: pd.DataFrame | None, new_bars: pd.DataFrame) -> pd.DataFrame:
@@ -91,8 +102,14 @@ def _coverage_months(pg, seg_df: pd.DataFrame, start: date, end: date) -> list[t
     return months_in_range(start, end)
 
 
-def _read_l1_month(lake, pg, y: int, m: int, symbols: set[str]) -> pd.DataFrame | None:
-    from lexis_markets.lake import compacted_data_key, month_prefix
+def _read_l1_month(
+    lake,
+    y: int,
+    m: int,
+    symbols: set[str],
+    compacted_key: str | None,
+) -> pd.DataFrame | None:
+    from lexis_markets.lake import month_prefix
 
     obs_cols = [
         "source",
@@ -108,9 +125,8 @@ def _read_l1_month(lake, pg, y: int, m: int, symbols: set[str]) -> pd.DataFrame 
         "realtime_end",
     ]
     filters = [("source_symbol", "in", sorted(symbols))]
-    key = compacted_data_key(lake, pg, y, m)
-    if key:
-        df = lake.get_df_parquet(key, columns=obs_cols, filters=filters)
+    if compacted_key:
+        df = lake.get_df_parquet(compacted_key, columns=obs_cols, filters=filters)
         return df if not df.empty else None
     keys = [k for k in lake.list_keys(month_prefix(y, m)) if k.endswith(".parquet")]
     if not keys:
@@ -120,6 +136,65 @@ def _read_l1_month(lake, pg, y: int, m: int, symbols: set[str]) -> pd.DataFrame 
     if not frames:
         return None
     return pd.concat(frames, ignore_index=True)
+
+
+def load_months_for_symbols(
+    lake,
+    pg,
+    months: list[tuple[int, int]],
+    symbols: list[str] | set[str],
+) -> pd.DataFrame:
+    """Read L1 once for a month set × symbol union (coalesced MinIO path)."""
+    if not months or not symbols:
+        return pd.DataFrame()
+    from lexis_markets.lake import compacted_data_keys
+
+    sym_set = {str(s).upper() for s in symbols}
+    key_by_month = compacted_data_keys(lake, pg, months)
+    workers = min(int(os.environ.get("STITCH_MONTH_WORKERS", "8")), len(months) or 1)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        frames = [
+            f
+            for f in ex.map(
+                lambda ym: _read_l1_month(
+                    lake, ym[0], ym[1], sym_set, key_by_month.get(ym)
+                ),
+                months,
+            )
+            if f is not None
+        ]
+    if not frames:
+        return pd.DataFrame()
+    obs = pd.concat(frames, ignore_index=True)
+    obs["source_symbol"] = obs["source_symbol"].astype(str).str.upper()
+    obs["ts"] = pd.to_datetime(obs["ts"]).dt.date
+    return obs
+
+
+def merge_obs_with_segments(
+    obs: pd.DataFrame,
+    seg_df: pd.DataFrame,
+    start: date,
+    end: date,
+    *,
+    as_of: date | None = None,
+) -> pd.DataFrame:
+    """Join preloaded L1 observations to stitch segments (no MinIO)."""
+    if obs is None or obs.empty or seg_df.empty:
+        return pd.DataFrame()
+    symbols = {str(s).upper() for s in seg_df["source_symbol"]}
+    part = obs[obs["source_symbol"].isin(symbols)].copy()
+    if part.empty:
+        return pd.DataFrame()
+    part = part[(part["ts"] >= start) & (part["ts"] <= end)]
+    segments = seg_df.copy()
+    segments["source_symbol"] = segments["source_symbol"].astype(str).str.upper()
+    merged = part.merge(segments, on=["source", "source_symbol"], how="inner")
+    if merged.empty:
+        return merged
+    merged = merged[merged["valid_from"].isna() | (merged["ts"] >= merged["valid_from"])]
+    merged = merged[merged["valid_to"].isna() | (merged["ts"] <= merged["valid_to"])]
+    return collapse_fred_vintages(merged, as_of=as_of)
 
 
 def load_source_bars(
@@ -134,32 +209,57 @@ def load_source_bars(
     if seg_df.empty:
         return pd.DataFrame()
     symbols = sorted({str(s).upper() for s in seg_df["source_symbol"]})
-    sym_set = set(symbols)
     months = _coverage_months(pg, seg_df, start, end)
-    workers = min(16, len(months) or 1)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        frames = [
-            f
-            for f in ex.map(
-                lambda ym: _read_l1_month(lake, pg, ym[0], ym[1], sym_set),
-                months,
-            )
-            if f is not None
-        ]
-    if not frames:
-        return pd.DataFrame()
-    obs = pd.concat(frames, ignore_index=True)
-    obs["source_symbol"] = obs["source_symbol"].astype(str).str.upper()
-    obs["ts"] = pd.to_datetime(obs["ts"]).dt.date
-    obs = obs[(obs["ts"] >= start) & (obs["ts"] <= end)]
-    segments = seg_df.copy()
-    segments["source_symbol"] = segments["source_symbol"].astype(str).str.upper()
-    merged = obs.merge(segments, on=["source", "source_symbol"], how="inner")
-    if merged.empty:
+    obs = load_months_for_symbols(lake, pg, months, symbols)
+    return merge_obs_with_segments(obs, seg_df, start, end, as_of=as_of)
+
+
+def drop_contradicted_jw_flats(
+    merged: pd.DataFrame,
+    *,
+    min_run: int = FLAT_CLOSE_MIN_RUN,
+    rel: float = JW_FLAT_DISAGREE_REL,
+) -> pd.DataFrame:
+    """Drop jakewright bars in a long flat or linear-ramp run when another source disagrees."""
+    if merged.empty or "source" not in merged.columns or "series_id" not in merged.columns:
         return merged
-    merged = merged[merged["valid_from"].isna() | (merged["ts"] >= merged["valid_from"])]
-    merged = merged[merged["valid_to"].isna() | (merged["ts"] <= merged["valid_to"])]
-    return collapse_fred_vintages(merged, as_of=as_of)
+    parts = []
+    for _, grp in merged.groupby("series_id", sort=False):
+        parts.append(_drop_contradicted_jw_flats_one(grp, min_run=min_run, rel=rel))
+    return pd.concat(parts, ignore_index=True) if parts else merged
+
+
+def _drop_contradicted_jw_flats_one(
+    grp: pd.DataFrame, *, min_run: int, rel: float
+) -> pd.DataFrame:
+    jw = grp[grp["source"] == "jakewright"]
+    if jw.empty:
+        return grp
+    jw = jw.sort_values("ts")
+    close = pd.to_numeric(jw["close"], errors="coerce").to_numpy(dtype=float)
+    mask = flat_close_mask(close, min_run=min_run) | linear_ramp_mask(close, min_run=min_run)
+    if not mask.any():
+        return grp
+    other = grp[grp["source"] != "jakewright"]
+    if other.empty:
+        return grp
+    jw_flat = jw.loc[mask, ["ts", "close"]].rename(columns={"close": "jw_close"})
+    hit = other.merge(jw_flat, on="ts")
+    if hit.empty:
+        return grp
+    hit = hit.copy()
+    hit["close"] = pd.to_numeric(hit["close"], errors="coerce")
+    hit["jw_close"] = pd.to_numeric(hit["jw_close"], errors="coerce")
+    ok = hit["close"].notna() & hit["jw_close"].notna() & (hit["jw_close"].abs() > 0)
+    hit = hit.loc[ok]
+    if hit.empty:
+        return grp
+    disagree = (hit["close"] - hit["jw_close"]).abs() / hit["jw_close"].abs() > rel
+    bad_ts = set(hit.loc[disagree, "ts"])
+    if not bad_ts:
+        return grp
+    drop = (grp["source"] == "jakewright") & grp["ts"].isin(bad_ts)
+    return grp.loc[~drop]
 
 
 def pick_winners(merged: pd.DataFrame) -> pd.DataFrame:
@@ -212,6 +312,66 @@ def _overlap_calibration_factor(
     return float((both["close_p"] / both["close_f"]).median())
 
 
+def _raw_close_on(
+    merged: pd.DataFrame, series_id: str, source: str, ts
+) -> float | None:
+    sub = merged[
+        (merged["series_id"] == series_id)
+        & (merged["source"] == source)
+        & (merged["ts"] == ts)
+        & merged["close"].notna()
+        & (merged["close"] > 0)
+    ]
+    if sub.empty:
+        return None
+    return float(sub.iloc[0]["close"])
+
+
+def plausible_calibration_ratio(k: float | None) -> bool:
+    """True when ``k`` is inside the default band or a known split factor."""
+    if k is None or k <= 0 or not math.isfinite(k):
+        return False
+    if CALIBRATION_MIN_RATIO <= k <= CALIBRATION_MAX_RATIO:
+        return True
+    for n in CALIBRATION_SPLIT_FACTORS:
+        target = float(n)
+        inv = 1.0 / target
+        if abs(k - target) / target <= CALIBRATION_SPLIT_TOL:
+            return True
+        if abs(k - inv) / inv <= CALIBRATION_SPLIT_TOL:
+            return True
+    return False
+
+
+def _fill_scale_onto_prior(
+    merged: pd.DataFrame,
+    series_id: str,
+    pri_src: str,
+    fill_src: str,
+    pri_close: float,
+    pri_last_ts,
+    fill_first_ts,
+) -> float | None:
+    """Scale factor mapping fill OHLC onto the already-calibrated prior segment.
+
+    Raw overlap ratios alone are wrong after a prior hop (e.g. JC→YF then YF→MP):
+    YF may already be scaled onto JC while MP/YF tip overlap is ~1.0, which leaves an
+    unscaled MP stub. Multiply the raw overlap ratio by the prior segment's current
+    scale (calibrated last close / raw prior close). With no overlap, chain at the
+    junction: ``pri_close / fill_first_raw``.
+    """
+    if pri_close <= 0:
+        return None
+    fill_raw = _raw_close_on(merged, series_id, fill_src, fill_first_ts)
+    if fill_raw is None or fill_raw <= 0:
+        return None
+    k_raw = _overlap_calibration_factor(merged, series_id, pri_src, fill_src)
+    pri_raw = _raw_close_on(merged, series_id, pri_src, pri_last_ts)
+    if k_raw is not None and pri_raw is not None and pri_raw > 0:
+        return k_raw * (pri_close / pri_raw)
+    return pri_close / fill_raw
+
+
 def calibrate_fill_gaps(bars: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFrame:
     """Scale fill-source OHLC onto the prior segment; drop runs that fail calibration."""
     if bars.empty:
@@ -229,19 +389,16 @@ def calibrate_fill_gaps(bars: pd.DataFrame, merged: pd.DataFrame) -> pd.DataFram
             pe = runs[i - 1]["end"]
             pri_close = float(g.iloc[pe]["close"])
             series_id = g.iloc[0]["series_id"]
-            k = _overlap_calibration_factor(merged, series_id, pri_src, fill_src)
-            if k is None:
-                fill_first_ts = g.iloc[runs[i]["start"]]["ts"]
-                raw = merged[
-                    (merged["series_id"] == series_id)
-                    & (merged["source"] == fill_src)
-                    & (merged["ts"] == fill_first_ts)
-                ]
-                if raw.empty or float(raw.iloc[0]["close"]) <= 0 or pri_close <= 0:
-                    g.iloc[sl, g.columns.get_loc("data_quality")] = "stitch_break"
-                    continue
-                k = pri_close / float(raw.iloc[0]["close"])
-            if k < CALIBRATION_MIN_RATIO or k > CALIBRATION_MAX_RATIO:
+            k = _fill_scale_onto_prior(
+                merged,
+                series_id,
+                pri_src,
+                fill_src,
+                pri_close,
+                g.iloc[pe]["ts"],
+                g.iloc[runs[i]["start"]]["ts"],
+            )
+            if not plausible_calibration_ratio(k):
                 g.iloc[sl, g.columns.get_loc("data_quality")] = "stitch_break"
                 continue
             for col in PRICE_COLS:
@@ -260,13 +417,47 @@ def stitch_series(
     *,
     revision_mode: RevisionMode = "latest",
     as_of: date | None = None,
+    seg_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    seg_df = load_stitch_segments(pg, [series_id])
+    if seg_df is None:
+        seg_df = load_stitch_segments(pg, [series_id])
+    else:
+        seg_df = seg_df[seg_df["series_id"] == series_id]
     collapse_as_of = resolve_collapse_as_of(
         revision_mode=revision_mode,
         request_end=end,
         as_of=as_of,
     )
     merged = load_source_bars(lake, pg, seg_df, start, end, as_of=collapse_as_of)
+    merged = drop_contradicted_jw_flats(merged)
     bars = pick_winners(merged)
-    return calibrate_fill_gaps(bars, merged)
+    bars = calibrate_fill_gaps(bars, merged)
+    return collapse_halt_flats(bars)
+
+
+def stitch_series_from_obs(
+    series_id: str,
+    start: date,
+    end: date,
+    seg_df: pd.DataFrame,
+    obs: pd.DataFrame,
+    *,
+    revision_mode: RevisionMode = "latest",
+    as_of: date | None = None,
+) -> pd.DataFrame:
+    """Stitch one series from a preloaded multi-symbol L1 observation frame."""
+    if seg_df is None or seg_df.empty:
+        return pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+    seg = seg_df[seg_df["series_id"] == series_id]
+    if seg.empty:
+        return pd.DataFrame(columns=CANONICAL_BAR_COLUMNS)
+    collapse_as_of = resolve_collapse_as_of(
+        revision_mode=revision_mode,
+        request_end=end,
+        as_of=as_of,
+    )
+    merged = merge_obs_with_segments(obs, seg, start, end, as_of=collapse_as_of)
+    merged = drop_contradicted_jw_flats(merged)
+    bars = pick_winners(merged)
+    bars = calibrate_fill_gaps(bars, merged)
+    return collapse_halt_flats(bars)

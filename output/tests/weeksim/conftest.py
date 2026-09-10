@@ -106,7 +106,6 @@ def day0_seed(week_cfg, lake, pg, gates, clock, universe, week_state, ray_sessio
     target = clock.week_start - timedelta(days=1)
     out = run_seed(
         week_cfg,
-        reset=False,
         deploy_serve_app=False,
         gates=gates,
         eod_target_date=target,

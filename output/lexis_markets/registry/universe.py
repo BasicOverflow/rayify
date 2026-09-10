@@ -10,8 +10,6 @@ from datetime import date
 
 from lexis_markets.lake import PgClient
 
-US_LISTING_CODES = frozenset({"Q", "N", "P", "Z", "A"})
-
 LIVE_L2_WHERE = """
     EXISTS (
         SELECT 1 FROM symbol_aliases jc
@@ -52,17 +50,6 @@ def extras_date(extras, key: str) -> date | None:
     """Parse ``extras[key]`` as ISO date; accepts dict or JSON string extras."""
     raw = parse_extras(extras).get(key)
     return date.fromisoformat(raw) if raw else None
-
-
-def us_listed_extras(extras: dict) -> bool:
-    code = str((extras or {}).get("listing_exchange") or "").strip().upper()
-    if not code:
-        return True
-    return code in US_LISTING_CODES
-
-
-def live_l2_eligible(*, in_jacksoncrow: bool, extras: dict) -> bool:
-    return in_jacksoncrow and us_listed_extras(extras)
 
 
 def mark_yf_skip(pg: PgClient, series_ids: list[str], reason: str, *, delist: bool = False) -> int:

@@ -12,7 +12,7 @@ import ray
 import requests
 import yfinance as yf
 
-from lexis_markets.lake import LakeStore, L1Writer, PgClient, get_json, put_json, utcnow
+from lexis_markets.lake import LakeStore, L1Writer, PgClient, get_json, put_json, utcnow, lake_from_cfg_d, cfg_d_with_scratch
 from lexis_markets.registry.nasdaq import fetch_nasdaq_directory
 from lexis_markets.registry import (
     EOD_ELIGIBLE_WHERE,
@@ -28,6 +28,7 @@ from lexis_markets.logging_setup import get_logger
 from lexis_markets.eod.entity import run_eod_gap_scan, run_entity_detect
 from lexis_markets.jobs.clock import eod_target_date
 from lexis_markets.jobs.scheduler import plan_task_resources, run_batches
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
 from lexis_markets.ray.gate_client import (
     is_yf_rate_limited,
     yf_acquire,
@@ -236,10 +237,10 @@ def _ingest_mp_day_df(
     return details
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def task_ingest_mp_day(cfg_d: dict, day_iso: str, targets: list[dict], run_id: str) -> list[dict]:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     key = mp_combined_key(day_iso)
     if not lake.exists(key):
         return []
@@ -250,8 +251,8 @@ def task_ingest_mp_day(cfg_d: dict, day_iso: str, targets: list[dict], run_id: s
 def _run_mp_days(cfg: MarketsConfig, by_day: dict[date, list[dict]], run_id: str) -> list[dict]:
     if not by_day:
         return []
-    lake = LakeStore(cfg)
-    cfg_d = cfg.to_dict()
+    cfg_d = cfg_d_with_scratch(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     jobs = []
     for d, tgts in sorted(by_day.items()):
         raw = fetch_mp_daily(d, lake)
@@ -386,8 +387,6 @@ def _ingest_yf_targets(
             mapped = map_ohlcv(
                 sub, source="yfinance", symbol_col="Symbol", date_col="Date", series_type=t["series_type"]
             )
-            if "adj_close" in mapped.columns:
-                mapped["close"] = mapped["adj_close"].where(mapped["adj_close"].notna(), mapped["close"])
             meta = L1Writer(lake, run_id=run_id).write_parts(mapped, shard=uuid4().hex[:8])
             detail = meta["details"][0] if meta["details"] else {}
             detail["source"] = "yfinance"
@@ -412,11 +411,56 @@ def _ingest_yf_targets(
     return details
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def task_ingest_eod_chunk(cfg_d: dict, job: dict, run_id: str, yf_gate) -> list[dict]:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     return _ingest_yf_targets(cfg, lake, job["targets"], job["start"], job["end"], run_id, yf_gate)
+
+
+def _ok_wave_ids(details: list[dict]) -> tuple[list[str], list[str]]:
+    series_ids: list[str] = []
+    symbols: list[str] = []
+    for d in details:
+        if int(d.get("rows") or 0) <= 0:
+            continue
+        sid = d.get("series_id")
+        if sid:
+            series_ids.append(str(sid))
+        sym = d.get("symbol")
+        if sym:
+            symbols.append(str(sym))
+    return series_ids, symbols
+
+
+def _finish_wave_l3(
+    cfg: MarketsConfig,
+    pg: PgClient,
+    details: list[dict],
+    *,
+    mode: str,
+    align: bool,
+) -> None:
+    """Patch registry + optional JW align. Serve warm only when mode is tip/full."""
+    from lexis_markets.eod.l3_warm import align_symbols, warm_series_ids
+    from lexis_markets.registry import patch_eod_registry, seed_default_stitch
+
+    eod_details = [d for d in details if d.get("source") in EOD_SOURCES]
+    if eod_details:
+        patch_eod_registry(pg, eod_details)
+        seed_default_stitch(pg)
+    series_ids, symbols = _ok_wave_ids(details)
+    if align and symbols:
+        align_symbols(cfg, symbols)
+    if mode in ("", "off", "none") or not series_ids:
+        return
+    try:
+        warm_series_ids(cfg, pg, series_ids, mode=mode)
+    except Exception:
+        if cfg.test.enabled:
+            logger.warning("l3 warm skipped (test profile)", exc_info=True)
+            return
+        raise
 
 
 def _run_yf(
@@ -424,6 +468,9 @@ def _run_yf(
     targets: list[dict],
     run_id: str,
     yf_gate,
+    *,
+    pg: PgClient | None = None,
+    l3_warm: str = "off",
 ) -> list[dict]:
     if not targets:
         return []
@@ -433,7 +480,7 @@ def _run_yf(
 
     remaining = list(targets)
     details: list[dict] = []
-    cfg_d = cfg.to_dict()
+    cfg_d = cfg_d_with_scratch(cfg)
     wave_cap = (
         cfg.eod_max_in_flight if cfg.eod_max_in_flight > 0 else max(1, cfg.yf_wave_jobs)
     )
@@ -469,7 +516,10 @@ def _run_yf(
             ),
             shape,
         )
-        details.extend(d for r in batch_results for d in r)
+        wave_details = [d for r in batch_results for d in r]
+        details.extend(wave_details)
+        if pg is not None:
+            _finish_wave_l3(cfg, pg, wave_details, mode=l3_warm, align=True)
         done = {_target_key(t) for j in wave for t in j["targets"]}
         remaining = [t for t in remaining if _target_key(t) not in done]
     return details
@@ -488,12 +538,15 @@ def ingest_eod(
     yf_gate,
     limit: int | None = None,
     target_date: date | None = None,
+    l3_warm: str | None = None,
 ) -> dict:
     t0 = time.perf_counter()
     ensure_eod_aliases(pg)
     target = target_date or eod_target_date()
     as_of = _as_of_today(target)
     full_path = (not cfg.test.enabled) or cfg.test.eod_full_path
+    if l3_warm is None:
+        l3_warm = "off" if cfg.test.enabled else "full"
 
     if not full_path:
         detect_out = {"registered": 0, "skipped": "test_profile"}
@@ -580,11 +633,13 @@ def ingest_eod(
     if by_day:
         sym_n = len({t["symbol"] for tgts in by_day.values() for t in tgts})
         logger.info("marketparquet: days=%s symbols=%s free_window=%sd", len(by_day), sym_n, MP_FREE_DAYS)
-        details.extend(_run_mp_days(cfg, by_day, run_id))
+        mp_details = _run_mp_days(cfg, by_day, run_id)
+        details.extend(mp_details)
+        _finish_wave_l3(cfg, pg, mp_details, mode=l3_warm, align=False)
 
     yf_targets = _yf_jobs(targets)
     if yf_targets:
-        details.extend(_run_yf(cfg, yf_targets, run_id, yf_gate))
+        details.extend(_run_yf(cfg, yf_targets, run_id, yf_gate, pg=pg, l3_warm=l3_warm))
 
     details = merge_details(details)
     yf_skip_n = patch_yf_skip_failures(pg, details)

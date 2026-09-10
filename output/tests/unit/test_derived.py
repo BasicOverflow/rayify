@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -48,3 +49,24 @@ def test_apply_multiple_features():
     out = apply_derived_features(_bars([1.0, 2.0, 3.0, 4.0, 5.0]), ["sma_2", "ema_2"])
     assert "sma_2" in out.columns
     assert "ema_2" in out.columns
+
+
+@pytest.mark.unit
+def test_returns_log_price_masks():
+    closes = [10.0, 11.0, 12.1]
+    out = apply_derived_features(
+        _bars(closes),
+        ["returns", "log_price", "gap_mask", "is_suspicious"],
+    )
+    assert pd.isna(out.loc[0, "returns"])
+    assert abs(out.loc[1, "returns"] - 0.1) < 1e-9
+    assert abs(out.loc[0, "log_price"] - np.log(10.0)) < 1e-9
+    assert not bool(out.loc[0, "gap_mask"])
+    assert not out["is_suspicious"].any()
+
+
+@pytest.mark.unit
+def test_is_suspicious_flags_flat_run():
+    closes = [5.0] * 25
+    out = apply_derived_features(_bars(closes), ["is_suspicious"])
+    assert out["is_suspicious"].sum() >= 21

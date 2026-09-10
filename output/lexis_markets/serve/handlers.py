@@ -10,7 +10,8 @@ import ray
 from fastapi import HTTPException
 
 from lexis_markets.config import MarketsConfig
-from lexis_markets.domain.quality import series_quality_window
+from lexis_markets.domain.quality import QUALITY_FLAG_COLUMNS, series_quality_window
+from lexis_markets.domain.recipes import canonicalize_recipe_mode, parse_nan_policy
 from lexis_markets.jobs.clock import eod_target_date
 from lexis_markets.lake import LakeStore, PgClient, get_json
 from lexis_markets.logging_setup import get_logger
@@ -26,7 +27,7 @@ from lexis_markets.serve.series_query import task_query_series_bars
 logger = get_logger("serve.handlers")
 
 DEFAULT_EOD_LOOKBACK_DAYS = 14
-DATASET_MODES = frozenset({"range", "eod_snapshot"})
+DATASET_MODES = frozenset({"range", "range_panel", "eod_snapshot", "wide_matrix"})
 
 
 def clip_range(pg: PgClient, series_ids: list[str], start: date, end: date) -> tuple[date, date]:
@@ -68,6 +69,10 @@ def _meta_json_row(row: dict) -> dict:
         "quality_score": row.get("quality_score"),
         "calendar_id": row.get("calendar_id"),
     }
+    for flag in QUALITY_FLAG_COLUMNS:
+        key = f"flag_{flag}"
+        if key in row:
+            out[key] = row.get(key)
     last = effective_last_seen(row)
     if last is not None:
         out["effective_last_seen"] = last.isoformat()
@@ -114,10 +119,7 @@ def _query_dedupe_key(
 
 
 def parse_dataset_mode(raw: str | None) -> str:
-    mode = (raw or "range").strip().lower()
-    if mode not in DATASET_MODES:
-        raise ValueError(f"mode must be one of {sorted(DATASET_MODES)}, got {raw!r}")
-    return mode
+    return canonicalize_recipe_mode(raw)
 
 
 def resolve_eod_snapshot_day(eod_date: str | date | None = None) -> date:
@@ -141,14 +143,22 @@ def snapshot_last_bars(bars: pd.DataFrame, *, as_of: date) -> pd.DataFrame:
 
 
 def normalize_query_spec(spec: dict) -> dict:
-    """Expand ``mode=eod_snapshot`` into a concrete daily lookback window."""
+    """Expand recipe modes into concrete query windows; default revision to L3 ``latest``."""
     out = dict(spec)
     mode = parse_dataset_mode(out.get("mode"))
     out["mode"] = mode
-    if mode != "eod_snapshot":
+    if out.get("revision_mode") is None:
+        out["revision_mode"] = "latest"
+    if mode == "wide_matrix":
+        out["nan_policy"] = parse_nan_policy(out.get("nan_policy"))
+        out.setdefault("value_col", "close")
+        out.setdefault("column_key", "series_id")
+    if mode in ("range_panel", "wide_matrix"):
         if not out.get("start") or not out.get("end"):
-            raise ValueError("start and end are required when mode=range")
+            raise ValueError("start and end are required when mode=range_panel or wide_matrix")
         return out
+    if mode != "eod_snapshot":
+        raise ValueError(f"unsupported mode {mode!r}")
 
     as_of = resolve_eod_snapshot_day(out.get("eod_date"))
     raw_lookback = out.get("eod_lookback_days")
@@ -159,9 +169,6 @@ def normalize_query_spec(spec: dict) -> dict:
     out["end"] = as_of.isoformat()
     out["granularity"] = "daily"
     out["_snapshot_as_of"] = as_of.isoformat()
-    # Snapshots are a cross-section of latest prices; default to L3-friendly latest.
-    if out.get("revision_mode") is None:
-        out["revision_mode"] = "latest"
     return out
 
 
@@ -236,7 +243,10 @@ class MarketsService:
             """
             SELECT series_id, canonical_symbol, asset_class, calendar_id,
                    gap_count, disagreement_count, suspicious_count,
-                   quality_score, first_seen, last_seen, status, extras
+                   quality_score, first_seen, last_seen, status, extras,
+                   flag_linear_ramp, flag_sparse_bridge, flag_flat_close,
+                   flag_ohlc_violation, flag_non_positive_close,
+                   flag_duplicate_ts, flag_extreme_return
             FROM series_meta WHERE series_id = %s
             """,
             (series_id,),
@@ -305,6 +315,7 @@ class MarketsService:
         max_gap_count: int | None = None,
         max_suspicious_count: int | None = None,
         include_partial_coverage: bool = True,
+        include_rows: bool = True,
     ) -> dict:
         meta = self.series_meta_row(series_id)
         if not meta:
@@ -343,7 +354,7 @@ class MarketsService:
         if last is not None:
             quality["effective_last_seen"] = last.isoformat()
             quality["covers_through_end"] = covers_through_end(meta, end_date)
-        return {
+        out = {
             "series_id": series_id,
             "mode": "range",
             "start": start,
@@ -353,8 +364,13 @@ class MarketsService:
             "as_of": as_of,
             "features": features or [],
             "quality": quality,
-            "rows": _rows_json(bars),
         }
+        if include_rows:
+            out["rows"] = _rows_json(bars)
+        else:
+            out["rows"] = []
+            out["row_count"] = 0 if bars is None else int(len(bars))
+        return out
 
     def query_series_eod(
         self,

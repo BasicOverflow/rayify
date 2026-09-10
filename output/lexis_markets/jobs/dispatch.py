@@ -1,23 +1,18 @@
 """Drain the SQLite pending queue into Ray remote jobs with bounded concurrency."""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import date
 
 import ray
 
-from lexis_markets.lake import PgClient
 from lexis_markets.config import MarketsConfig
 from lexis_markets.logging_setup import get_logger
 from lexis_markets.ray.gate_client import GateHandles
-from lexis_markets.ray.runtime import max_in_flight, ray_cluster_ready
-from lexis_markets.eod.quality import apply_quality_updates, task_quality_scan_batch
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS, max_in_flight, ray_cluster_ready
 from lexis_markets.jobs.queue import SupervisorState
 
 logger = get_logger("jobs.dispatch")
-
-QUALITY_BATCH = 8  # series per ``task_quality_scan_batch`` remote
 
 
 @dataclass
@@ -25,60 +20,6 @@ class WorkItem:
     item_id: int
     job_type: str
     payload: dict
-
-
-def _quality_rows(pg: PgClient, payload: dict) -> list[dict]:
-    asset_classes = payload.get("asset_classes") or ("equity", "etf", "macro")
-    series_ids = payload.get("series_ids")
-    limit = payload.get("limit")
-    if series_ids:
-        rows = pg.fetchall(
-            """
-            SELECT series_id, calendar_id, first_seen, last_seen
-            FROM series_meta
-            WHERE series_id = ANY(%s) AND first_seen IS NOT NULL AND last_seen IS NOT NULL
-            """,
-            (series_ids,),
-        )
-    else:
-        rows = pg.fetchall(
-            """
-            SELECT series_id, calendar_id, first_seen, last_seen
-            FROM series_meta
-            WHERE asset_class = ANY(%s) AND first_seen IS NOT NULL AND last_seen IS NOT NULL
-            ORDER BY series_id
-            """,
-            (list(asset_classes),),
-        )
-    if limit:
-        rows = rows[: int(limit)]
-    return rows
-
-
-def run_quality_job(cfg: MarketsConfig, payload: dict) -> dict:
-    pg = PgClient(cfg.postgres_url)
-    rows = _quality_rows(pg, payload)
-    if not rows:
-        return {"series": 0, "gap_nonzero": 0, "gap_total": 0}
-
-    cfg_d = cfg.to_dict()
-    batches = [rows[i : i + QUALITY_BATCH] for i in range(0, len(rows), QUALITY_BATCH)]
-    refs = [task_quality_scan_batch.remote(cfg_d, batch) for batch in batches]
-    updates: list[tuple] = []
-    for ref in refs:
-        updates.extend(ray.get(ref))
-    apply_quality_updates(pg, updates)
-    gaps = [u[0] for u in updates]
-    suspicious = [u[2] for u in updates]
-    out = {
-        "series": len(updates),
-        "gap_nonzero": sum(1 for g in gaps if g > 0),
-        "gap_total": sum(gaps),
-        "suspicious_nonzero": sum(1 for s in suspicious if s > 0),
-        "suspicious_total": sum(suspicious),
-    }
-    logger.info("quality job done %s", out)
-    return out
 
 
 def run_eod_job(cfg: MarketsConfig, payload: dict, *, gates: GateHandles) -> dict:
@@ -98,8 +39,7 @@ def run_eod_job(cfg: MarketsConfig, payload: dict, *, gates: GateHandles) -> dic
 def run_seed_job(cfg: MarketsConfig, payload: dict, *, gates: GateHandles) -> dict:
     from lexis_markets.kaggle.seed import run_seed
 
-    reset = os.environ.get("MARKETS_RESET") == "1" and bool(payload.get("reset"))
-    return run_seed(cfg, reset=reset, deploy_serve_app=False, gates=gates)
+    return run_seed(cfg, deploy_serve_app=False, gates=gates)
 
 
 def run_fred_backfill_job(cfg: MarketsConfig, payload: dict) -> dict:
@@ -130,8 +70,6 @@ def run_fred_backfill_job(cfg: MarketsConfig, payload: dict) -> dict:
 
 
 def dispatch_work_item(cfg: MarketsConfig, item: WorkItem, *, gates: GateHandles) -> dict:
-    if item.job_type == "quality":
-        return run_quality_job(cfg, item.payload)
     if item.job_type == "eod":
         return run_eod_job(cfg, item.payload, gates=gates)
     if item.job_type == "seed":
@@ -147,14 +85,14 @@ def submit_loop(
     *,
     gates: GateHandles,
     max_in_flight_jobs: int | None = None,
-    poll_seconds: float = 2.0,  # ``ray.wait`` timeout while draining in-flight jobs
+    poll_seconds: float = 2.0,
 ) -> int:
     if not ray_cluster_ready():
         logger.warning("submit_loop skipped: Ray cluster unavailable; leaving pending queue intact")
         return 0
 
-    cap = max_in_flight_jobs or max_in_flight()
-    pending_items = state.fetch_pending(limit=cap)
+    cap = max_in_flight_jobs if max_in_flight_jobs is not None else max_in_flight()
+    pending_items = state.fetch_pending(limit=None if cap <= 0 else cap)
     if not pending_items:
         return 0
 
@@ -163,7 +101,7 @@ def submit_loop(
     idx = 0
 
     while idx < len(pending_items) or in_flight:
-        while idx < len(pending_items) and len(in_flight) < cap:
+        while idx < len(pending_items) and (cap <= 0 or len(in_flight) < cap):
             item_dict = pending_items[idx]
             item = WorkItem(
                 item_id=item_dict["id"],
@@ -194,8 +132,6 @@ def submit_loop(
             for key in ("run_key", "mode", "target_date", "vintage_end"):
                 if key in item.payload:
                     detail.setdefault(key, item.payload[key])
-            if item.job_type == "seed":
-                detail["reset"] = bool(item.payload.get("reset"))
             state.record_last_run(item.job_type, detail)
             if item.job_type == "eod" and item.payload.get("mode") == "catchup":
                 state.record_last_run("eod_catchup", detail)
@@ -209,10 +145,13 @@ def submit_loop(
     return len(pending_items)
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def _remote_dispatch(
     cfg_d: dict, item_id: int, job_type: str, payload: dict, yf_gate, fred_gate
 ) -> dict:
+    from lexis_markets.lake import reset_seed_scratch
+
+    reset_seed_scratch()
     cfg = MarketsConfig.from_dict(cfg_d)
     item = WorkItem(item_id=item_id, job_type=job_type, payload=payload)
     gates = GateHandles(yf_gate=yf_gate, fred_gate=fred_gate)

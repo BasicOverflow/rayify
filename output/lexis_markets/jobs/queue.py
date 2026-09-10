@@ -109,18 +109,18 @@ class SupervisorState:
         logger.info("pending enqueued id=%s job_type=%s", item_id, job_type)
         return item_id
 
-    def fetch_pending(self, limit: int = 32) -> list[dict]:
+    def fetch_pending(self, limit: int | None = 32) -> list[dict]:
+        sql = """
+            SELECT id, job_type, payload_json, status, created_at
+            FROM pending
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+        """
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, job_type, payload_json, status, created_at
-                FROM pending
-                WHERE status = 'pending'
-                ORDER BY created_at ASC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if limit is None or limit <= 0:
+                rows = conn.execute(sql).fetchall()
+            else:
+                rows = conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
         return [
             {
                 "id": r["id"],

@@ -29,7 +29,6 @@ def test_day0_seed_idempotent_markers(require_day0, week_cfg, lake, gates, clock
     target = clock.week_start - __import__("datetime").timedelta(days=1)
     out = run_seed(
         week_cfg,
-        reset=False,
         deploy_serve_app=False,
         gates=gates,
         eod_target_date=target,

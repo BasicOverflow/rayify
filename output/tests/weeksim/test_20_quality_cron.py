@@ -1,4 +1,4 @@
-"""Quality + cron gating on the week spine (via jobs queue + dispatch)."""
+"""Cron gating: seed / EOD, no quality job."""
 from __future__ import annotations
 
 import pytest
@@ -8,34 +8,22 @@ from lexis_markets.jobs.queue import SupervisorState
 from lexis_markets.supervisor.cron import (
     cron_tick,
     eod_window_open,
-    maybe_schedule_quality,
+    maybe_schedule_eod,
     maybe_schedule_seed,
 )
-from tests.weeksim.spine import drain_queue
 
 
 @pytest.mark.weeksim
-@pytest.mark.io
 @pytest.mark.order(20)
-def test_quality_after_nights(week_nights, week_cfg, pg, universe, gates, clock, ray_session, tmp_path, monkeypatch):
-    from tests.weeksim.asserts_goal import assert_pool_quality_registry
-
-    state = SupervisorState(str(tmp_path / "quality_cron.db"))
-    monkeypatch.setattr(
-        "lexis_markets.supervisor.cron.is_seed_complete",
-        lambda cfg: True,
-    )
-    monkeypatch.setattr(
-        "lexis_markets.supervisor.cron.pipeline_ready",
-        lambda cfg, st: True,
-    )
+def test_cron_does_not_schedule_quality(week_cfg, clock, tmp_path, monkeypatch):
+    state = SupervisorState(str(tmp_path / "no_quality_cron.db"))
+    monkeypatch.setattr("lexis_markets.supervisor.cron.is_seed_complete", lambda cfg: True)
+    monkeypatch.setattr("lexis_markets.supervisor.cron.pipeline_ready", lambda cfg, st: True)
     now = clock.eod_window_now()
-    assert maybe_schedule_quality(week_cfg, state, now) is True
-    started = drain_queue(week_cfg, state, gates=gates)
-    assert started >= 1
-    row = pg.fetchone("SELECT COUNT(*) AS n FROM series_meta WHERE gap_count IS NOT NULL")
-    assert row is not None
-    assert_pool_quality_registry(pg, universe)
+    tick = cron_tick(week_cfg, state, now)
+    assert "quality_scheduled" not in tick
+    pending = state.fetch_pending()
+    assert all(p["job_type"] != "quality" for p in pending)
 
 
 @pytest.mark.weeksim
@@ -66,10 +54,7 @@ def test_cron_schedules_when_ready(week_cfg, clock, tmp_path, monkeypatch):
         lambda cfg, st: True,
     )
     now = clock.eod_window_now()
-    from lexis_markets.supervisor.cron import maybe_schedule_eod
-
     assert maybe_schedule_eod(week_cfg, state, now) is True
-    assert maybe_schedule_quality(week_cfg, state, now) is True
     assert maybe_schedule_eod(week_cfg, state, now) is False
 
 

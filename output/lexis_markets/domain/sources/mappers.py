@@ -2,11 +2,36 @@
 from __future__ import annotations
 
 import json
-import os
 
+import numpy as np
 import pandas as pd
 
+from lexis_markets.config import PRICE_COLS
 from lexis_markets.lake import utcnow
+
+
+def scale_ohlc_to_adj_close(df: pd.DataFrame) -> pd.DataFrame:
+    """Scale open/high/low/close by adj_close/close so OHLC stay consistent.
+
+    Vendors often ship raw OHLC plus a separate adj_close. Writing adj into
+    ``close`` alone leaves close outside [low, high] after dividends/splits.
+    """
+    if df.empty or "adj_close" not in df.columns or "close" not in df.columns:
+        return df
+    out = df.copy()
+    close = pd.to_numeric(out["close"], errors="coerce")
+    adj = pd.to_numeric(out["adj_close"], errors="coerce")
+    valid = close.notna() & adj.notna() & (close > 0) & np.isfinite(close) & np.isfinite(adj)
+    if not valid.any():
+        return out
+    factor = pd.Series(1.0, index=out.index, dtype=float)
+    factor.loc[valid] = (adj / close).loc[valid]
+    for col in PRICE_COLS:
+        if col not in out.columns:
+            continue
+        vals = pd.to_numeric(out[col], errors="coerce")
+        out[col] = vals * factor
+    return out
 
 
 def map_ohlcv(
@@ -16,6 +41,7 @@ def map_ohlcv(
     symbol_col: str,
     date_col: str,
     series_type: str = "equity",
+    adjust_to_adj_close: bool = True,
 ) -> pd.DataFrame:
     colmap = {c.lower(): c for c in df.columns}
 
@@ -29,7 +55,7 @@ def map_ohlcv(
     vol_c, adj_c = col("Volume"), col("Adj Close", "adj_close", "AdjClose")
     div_c, split_c = col("Dividends", "dividend"), col("Stock Splits", "split", "Splits")
     n = len(df)
-    return pd.DataFrame(
+    out = pd.DataFrame(
         {
             "source": [source] * n,
             "source_symbol": df[symbol_col].astype(str).str.upper().to_numpy(),
@@ -50,6 +76,9 @@ def map_ohlcv(
             "extras": [json.dumps({"ingest": source})] * n,
         }
     )
+    if adjust_to_adj_close and adj_c is not None:
+        out = scale_ohlc_to_adj_close(out)
+    return out
 
 
 def merge_details(rows: list[dict]) -> list[dict]:

@@ -8,11 +8,17 @@ import ray
 
 from lexis_markets.config import MarketsConfig, cache_object_key
 from lexis_markets.domain.canonical_bar import CANONICAL_BAR_COLUMNS
+from lexis_markets.domain.ohlc_fix import enforce_ohlc_bounds
 from lexis_markets.jobs.scheduler import TaskShape, run_batches
-from lexis_markets.lake import LakeStore, PgClient, write_parquet_lake
+from lexis_markets.lake import LakeStore, PgClient, write_parquet_lake, open_lake
 from lexis_markets.logging_setup import get_logger
-from lexis_markets.ray.runtime import max_in_flight
-from lexis_markets.registry import merge_spans, uncached_ranges, update_cache_meta
+from lexis_markets.ray.runtime import IO_REMOTE_OPTS, max_in_flight
+from lexis_markets.registry import (
+    clear_series_cache_registry,
+    merge_spans,
+    uncached_ranges,
+    update_cache_meta,
+)
 from lexis_markets.serve.dedupe import InFlightDedupe
 from lexis_markets.serve.stitch import merge_canonical_cache, stitch_series
 
@@ -56,7 +62,7 @@ def _read_cache(lake: LakeStore, cfg: MarketsConfig, series_id: str) -> pd.DataF
     return df if not df.empty else None
 
 
-@ray.remote
+@ray.remote(**IO_REMOTE_OPTS)
 def task_build_cache_span(
     cfg_d: dict,
     series_id: str,
@@ -64,15 +70,30 @@ def task_build_cache_span(
     end_iso: str,
 ) -> dict:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
-    pg = PgClient(cfg.postgres_url)
-    start = date.fromisoformat(start_iso)
-    end = date.fromisoformat(end_iso)
+    return build_cache_span(
+        cfg,
+        series_id,
+        date.fromisoformat(start_iso),
+        date.fromisoformat(end_iso),
+    )
 
-    logger.info("cache_build series=%s span=%s..%s", series_id, start_iso, end_iso)
+
+def build_cache_span(
+    cfg: MarketsConfig,
+    series_id: str,
+    start: date,
+    end: date,
+) -> dict:
+    """Stitch ``[start, end]``, merge into L3 parquet, return span meta (no nested remotes)."""
+    lake = LakeStore(cfg)
+    pg = PgClient(cfg.postgres_url, pool_max=1)
+
+    logger.info("cache_build series=%s span=%s..%s", series_id, start, end)
     new_bars = stitch_series(lake, pg, series_id, start, end)
+    new_bars, ohlc_fixed = enforce_ohlc_bounds(new_bars)
     existing = _read_cache(lake, cfg, series_id)
     merged = merge_canonical_cache(existing, new_bars)
+    merged, ohlc_fixed2 = enforce_ohlc_bounds(merged)
 
     key = cfg.cache_object_key(series_id)
     if merged.empty:
@@ -97,13 +118,34 @@ def task_build_cache_span(
         "span_start": span_start.isoformat(),
         "span_end": span_end.isoformat(),
         "rows": len(merged),
+        "ohlc_fixed": int(ohlc_fixed) + int(ohlc_fixed2),
     }
-    logger.info("cache_build done series=%s rows=%s", series_id, out["rows"])
+    logger.info(
+        "cache_build done series=%s rows=%s ohlc_fixed=%s",
+        series_id,
+        out["rows"],
+        out["ohlc_fixed"],
+    )
     return out
 
 
-@ray.remote
+def invalidate_series_l3(cfg: MarketsConfig, series_id: str) -> dict:
+    """Delete L3 parquet + registry spans/meta for ``series_id``."""
+    lake = open_lake(cfg)
+    pg = PgClient(cfg.postgres_url, pool_max=1)
+    key = cfg.cache_object_key(series_id)
+    deleted = False
+    if lake.exists(key):
+        lake.delete_keys([key])
+        deleted = True
+    clear_series_cache_registry(pg, series_id)
+    logger.info("l3_invalidate series=%s deleted_object=%s", series_id, deleted)
+    return {"series_id": series_id, "deleted_object": deleted}
+
+
+@ray.remote(**IO_REMOTE_OPTS)
 def task_ensure_series_cache(cfg_d: dict, series_id: str, start_iso: str, end_iso: str) -> dict:
+    """Serve path: may nest span remotes via CacheService."""
     cfg = MarketsConfig.from_dict(cfg_d)
     svc = CacheService(cfg)
     return svc._build_missing_spans(series_id, date.fromisoformat(start_iso), date.fromisoformat(end_iso))
@@ -132,7 +174,7 @@ class CacheService:
             (series_id, dr.start.isoformat(), dr.end.isoformat())
             for dr in missing
         ]
-        shape = TaskShape(batch_size=1, max_in_flight=max_in_flight())
+        shape = TaskShape(batch_size=1, max_in_flight=0)
         results = run_batches(
             f"cache_{series_id}",
             jobs,
@@ -149,6 +191,9 @@ class CacheService:
 
         fp = l1_fingerprint(self.pg, start, end)
         update_cache_meta(self.pg, series_id, total_rows, fp)
+        from lexis_markets.serve.quality_persist import persist_l3_quality
+
+        persist_l3_quality(self.cfg, series_id, start, end)
         logger.info(
             "cache built series=%s spans=%s rows=%s",
             series_id,

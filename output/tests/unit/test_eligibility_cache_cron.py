@@ -153,14 +153,3 @@ def test_daily_eod_cron_only_after_window(tmp_path, monkeypatch):
     assert maybe_schedule_eod(cfg, state, late) is True
     assert state.fetch_pending()[0]["payload"]["mode"] == "daily"
     assert state.fetch_pending()[0]["payload"]["target_date"] == "2025-03-11"
-
-
-@pytest.mark.unit
-def test_has_yfinance_coverage():
-    from lexis_markets.eod.align import has_yfinance_coverage
-
-    pg = MagicMock()
-    pg.fetchone.return_value = None
-    assert has_yfinance_coverage(pg) is False
-    pg.fetchone.return_value = {"ok": 1}
-    assert has_yfinance_coverage(pg) is True

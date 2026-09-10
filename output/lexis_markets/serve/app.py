@@ -16,6 +16,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from lexis_markets.config import SERVE_APP_NAME, SERVE_ROUTE_PREFIX, MarketsConfig
 from lexis_markets.logging_setup import get_logger
+from lexis_markets.ray.runtime import OPS_REMOTE_OPTS
 from lexis_markets.serve.dedupe import InFlightDedupe
 from lexis_markets.serve.handlers import DEFAULT_EOD_LOOKBACK_DAYS, MarketsService
 
@@ -25,23 +26,26 @@ app = FastAPI(
     title="Lexis Markets",
     description=(
         "Stitched US equity/ETF + FRED macro OHLCV API. "
-        "L3 serves cache-first history (`revision_mode=latest`), live vintage collapse "
-        "(`as_of`), last-EOD snapshots, universe listings, and multi-series Parquet datasets "
+        "L3 cache-first by default (`revision_mode=latest`); pass `as_of` for live vintage "
+        "collapse. Recipes: `range_panel`, `eod_snapshot`, `wide_matrix`. "
+        "Universe listings and multi-series Parquet datasets "
         "(always one `dataset.parquet` per job)."
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
 class DatasetSpec(BaseModel):
     """Body for ``POST /v1/datasets``. Output is always one Parquet part under MinIO."""
 
-    mode: Literal["range", "eod_snapshot"] = Field(
-        "range",
+    mode: Literal["range", "range_panel", "eod_snapshot", "wide_matrix"] = Field(
+        "range_panel",
         description=(
-            "`range` — history for `[start, end]` (one row per session per series). "
+            "`range_panel` (alias `range`) — long history: one row per session per series. "
             "`eod_snapshot` — one row per matching series: last daily bar on/before "
-            "`eod_date` (default last EOD target / yesterday)."
+            "`eod_date` (default last EOD target / yesterday). "
+            "`wide_matrix` — dates × series_id matrix of `value_col` (default close); "
+            "see `nan_policy`."
         ),
     )
     series_ids: list[str] | None = Field(
@@ -58,12 +62,12 @@ class DatasetSpec(BaseModel):
     )
     start: str | None = Field(
         None,
-        description="Inclusive YYYY-MM-DD. **Required** when `mode=range`.",
+        description="Inclusive YYYY-MM-DD. **Required** for `range_panel` / `wide_matrix`.",
         examples=["2020-01-01"],
     )
     end: str | None = Field(
         None,
-        description="Inclusive YYYY-MM-DD. **Required** when `mode=range`. Also used for partial-coverage gates.",
+        description="Inclusive YYYY-MM-DD. **Required** for `range_panel` / `wide_matrix`.",
         examples=["2020-12-31"],
     )
     eod_date: str | None = Field(
@@ -79,7 +83,7 @@ class DatasetSpec(BaseModel):
     )
     granularity: str = Field(
         "daily",
-        description="Bar aggregation for `mode=range`: `daily`, `weekly`, or `monthly`. Forced `daily` for snapshots.",
+        description="Bar aggregation for panel modes: `daily`, `weekly`, or `monthly`. Forced `daily` for snapshots.",
     )
     statuses: list[str] | None = Field(
         None,
@@ -103,7 +107,7 @@ class DatasetSpec(BaseModel):
     )
     revision_mode: str | None = Field(
         None,
-        description="FRED vintage collapse: `as_of` (default for range) or `latest` (default for eod_snapshot).",
+        description="FRED vintage collapse: `latest` (default, L3 cache) or `as_of` (point-in-time).",
     )
     as_of: str | None = Field(
         None,
@@ -111,14 +115,32 @@ class DatasetSpec(BaseModel):
     )
     features: list[str] | None = Field(
         None,
-        description="Derived columns on close: `sma_<n>` / `ema_<n>` (window 2–500).",
-        examples=[["sma_20", "ema_50"]],
+        description=(
+            "Derived columns: `sma_<n>` / `ema_<n>`, `returns`, `log_price`, "
+            "`gap_mask`, `is_suspicious`."
+        ),
+        examples=[["sma_20", "returns", "is_suspicious"]],
+    )
+    nan_policy: Literal["keep", "drop_rows", "ffill"] | None = Field(
+        None,
+        description=(
+            "wide_matrix only. `keep` (default): calendar union with NaNs; "
+            "`drop_rows`: drop dates with any missing series; `ffill`: forward-fill columns."
+        ),
+    )
+    value_col: str | None = Field(
+        None,
+        description="wide_matrix value column (default `close`).",
+    )
+    column_key: str | None = Field(
+        None,
+        description="wide_matrix column key (default `series_id`).",
     )
 
     @model_validator(mode="after")
     def _range_requires_bounds(self):
-        if self.mode == "range" and (not self.start or not self.end):
-            raise ValueError("start and end are required when mode=range")
+        if self.mode in ("range", "range_panel", "wide_matrix") and (not self.start or not self.end):
+            raise ValueError("start and end are required when mode=range_panel or wide_matrix")
         return self
 
 
@@ -272,9 +294,9 @@ class MarketsApi:
         description=(
             "Queues (or sync-builds) a dataset job. Result is **one** "
             "`layer_3/outputs/{job_id}/dataset.parquet` plus `manifest.json`. "
-            "`mode=range` needs `start`/`end`. "
-            "`mode=eod_snapshot` exports one row per matching series at last EOD "
-            "(omit `series_ids` + set `asset_classes` / filters for a full-universe tape)."
+            "Recipes: `range_panel` (alias `range`), `eod_snapshot`, `wide_matrix` "
+            "(dates × series; `nan_policy=keep|drop_rows|ffill`). "
+            "Default `revision_mode=latest` (L3)."
         ),
     )
     async def create_dataset(
@@ -344,6 +366,10 @@ class MarketsApi:
             True,
             description="When false, exclude series that end before the request end date",
         ),
+        include_rows: bool = Query(
+            True,
+            description="When false, omit OHLCV rows (quality + meta only). Ingest/cache_fill use this.",
+        ),
     ):
         return await asyncio.to_thread(
             self.svc.query_series,
@@ -359,6 +385,7 @@ class MarketsApi:
             max_gap_count=max_gap_count,
             max_suspicious_count=max_suspicious_count,
             include_partial_coverage=include_partial_coverage,
+            include_rows=include_rows,
         )
 
 
@@ -380,7 +407,7 @@ def _head_node_id() -> str:
     raise RuntimeError("no alive Ray head node")
 
 
-@ray.remote(num_cpus=0)
+@ray.remote(num_cpus=0, **OPS_REMOTE_OPTS)
 def _restart_serve_http_on_head(port: int) -> None:
     import time as _time
 

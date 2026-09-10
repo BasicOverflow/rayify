@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS series_meta (
     gap_count INT NOT NULL DEFAULT 0,
     disagreement_count INT NOT NULL DEFAULT 0,
     suspicious_count INT NOT NULL DEFAULT 0,
+    flag_linear_ramp INT NOT NULL DEFAULT 0,
+    flag_sparse_bridge INT NOT NULL DEFAULT 0,
+    flag_flat_close INT NOT NULL DEFAULT 0,
+    flag_ohlc_violation INT NOT NULL DEFAULT 0,
+    flag_non_positive_close INT NOT NULL DEFAULT 0,
+    flag_duplicate_ts INT NOT NULL DEFAULT 0,
+    flag_extreme_return INT NOT NULL DEFAULT 0,
     quality_score DOUBLE PRECISION,
     extras JSONB NOT NULL DEFAULT '{}'::jsonb
 );
@@ -142,6 +149,13 @@ ALTER TABLE stitch_segments DROP COLUMN IF EXISTS rule_version;
 ALTER TABLE dataset_jobs DROP COLUMN IF EXISTS spec_hash;
 ALTER TABLE dataset_jobs DROP COLUMN IF EXISTS universe_version;
 ALTER TABLE dataset_jobs DROP COLUMN IF EXISTS rule_version;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_linear_ramp INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_sparse_bridge INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_flat_close INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_ohlc_violation INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_non_positive_close INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_duplicate_ts INT NOT NULL DEFAULT 0;
+ALTER TABLE series_meta ADD COLUMN IF NOT EXISTS flag_extreme_return INT NOT NULL DEFAULT 0;
 """
 
 KAGGLE_SOURCES = ("jakewright", "jacksoncrow")
@@ -170,8 +184,9 @@ def _series_id(asset_class: str, symbol: str) -> str:
 
 
 def _span_days(first: date, last: date, calendar_id: str) -> int:
+    # Seed-time approx: macros assumed monthly until bar-level quality rescores.
     if calendar_id == "fred_native":
-        return (last - first).days + 1
+        return max(1, int(round((last - first).days / 30.0)) + 1)
     return int(np.busday_count(first, last)) + 1
 
 
@@ -200,7 +215,6 @@ def _quality(dets: list[dict], first: date, last: date, calendar_id: str) -> tup
 
 def seed_from_details(pg: PgClient, details: list[dict]) -> dict:
     meta_rows = []
-    alias_rows = []
     details_by_sid: dict[str, list[dict]] = defaultdict(list)
     for d in details:
         if not d.get("symbol") or not d.get("first"):
@@ -220,9 +234,6 @@ def seed_from_details(pg: PgClient, details: list[dict]) -> dict:
         first_seen = date.fromisoformat(d["first"])
         last_seen = date.fromisoformat(d["last"]) if d.get("last") else first_seen
         meta_rows.append((sid, symbol, asset_class, series_type, calendar_id, "ACTIVE", first_seen, last_seen))
-        alias_rows.append((sid, source, symbol, first_seen, None))
-        if asset_class in ("equity", "etf") and source == "jacksoncrow":
-            alias_rows.append((sid, "yfinance", symbol, first_seen, None))
         details_by_sid[sid].append(d)
 
     by_id: dict[str, tuple] = {}
@@ -237,16 +248,49 @@ def seed_from_details(pg: PgClient, details: list[dict]) -> dict:
                 min(prev[6], row[6]), max(prev[7], row[7]),
             )
 
+    # Aliases: clip jacksoncrow valid_to to jakewright last when JW exists.
+    alias_rows = []
+    for sid, dets in details_by_sid.items():
+        jw_last = None
+        for d in dets:
+            if d["source"] == "jakewright" and d.get("last"):
+                ld = date.fromisoformat(d["last"])
+                jw_last = ld if jw_last is None else max(jw_last, ld)
+        seen_alias = set()
+        for d in dets:
+            if not d.get("symbol") or not d.get("first"):
+                continue
+            symbol = str(d["symbol"]).upper()
+            source = d["source"]
+            first_seen = date.fromisoformat(d["first"])
+            valid_to = jw_last if source == "jacksoncrow" and jw_last is not None else None
+            key = (sid, source, symbol)
+            if key not in seen_alias:
+                alias_rows.append((sid, source, symbol, first_seen, valid_to))
+                seen_alias.add(key)
+            asset = by_id[sid][2] if sid in by_id else ""
+            if asset in ("equity", "etf") and source == "jacksoncrow":
+                yf_key = (sid, "yfinance", symbol)
+                if yf_key not in seen_alias:
+                    alias_rows.append((sid, "yfinance", symbol, first_seen, None))
+                    seen_alias.add(yf_key)
+
     quality_rows = []
     for sid, row in by_id.items():
         dets = details_by_sid[sid]
         gap, disagreement, score = _quality(dets, row[6], row[7], row[4])
-        primary_dets = [d for d in dets if d["source"] in KAGGLE_SOURCES and d.get("last")]
+        # Tip handoff from jakewright when present; JC alone is fallback.
+        jw_dets = [d for d in dets if d["source"] == "jakewright" and d.get("last")]
+        jc_dets = [d for d in dets if d["source"] == "jacksoncrow" and d.get("last")]
         eod_dets = [d for d in dets if d["source"] in EOD_SOURCES and d.get("last")]
         extras_patch: dict[str, str] = {}
-        if primary_dets:
+        if jw_dets:
             extras_patch["primary_last_seen"] = max(
-                date.fromisoformat(d["last"]) for d in primary_dets
+                date.fromisoformat(d["last"]) for d in jw_dets
+            ).isoformat()
+        elif jc_dets:
+            extras_patch["primary_last_seen"] = max(
+                date.fromisoformat(d["last"]) for d in jc_dets
             ).isoformat()
         if eod_dets:
             extras_patch["eod_filled_through"] = max(
@@ -525,7 +569,11 @@ def resolve_fred_vintage_jobs(pg: PgClient, cfg, target: date, fred_gate) -> lis
 
 
 def patch_macro_eod_registry(pg: PgClient, details: list[dict]) -> dict:
-    ok = [d for d in details if d.get("vintage_through")]
+    ok = [
+        d
+        for d in details
+        if d.get("vintage_through") and int(d.get("rows") or 0) > 0
+    ]
     if not ok:
         return {"updated": 0}
     rows: list[tuple] = []
@@ -601,18 +649,30 @@ def uncached_ranges(pg: PgClient, series_id: str, req_start: date, req_end: date
 
 
 def merge_spans(pg: PgClient, series_id: str, span_start: date, span_end: date) -> None:
-    rows = pg.fetchall(
-        "SELECT span_start, span_end FROM series_cache_span WHERE series_id = %s ORDER BY span_start",
-        (series_id,),
-    )
-    intervals = [(r["span_start"], r["span_end"]) for r in rows]
-    intervals.append((span_start, span_end))
-    merged = _merge_intervals(intervals)
-    pg.execute("DELETE FROM series_cache_span WHERE series_id = %s", (series_id,))
-    pg.executemany(
-        "INSERT INTO series_cache_span (series_id, span_start, span_end) VALUES (%s, %s, %s)",
-        [(series_id, s, e) for s, e in merged],
-    )
+    """Merge a new cache span into ``series_cache_span`` under a per-series advisory lock."""
+
+    def _go():
+        with pg.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (series_id,))
+                cur.execute(
+                    "SELECT span_start, span_end FROM series_cache_span "
+                    "WHERE series_id = %s ORDER BY span_start",
+                    (series_id,),
+                )
+                rows = list(cur.fetchall())
+                intervals = [(r["span_start"], r["span_end"]) for r in rows]
+                intervals.append((span_start, span_end))
+                merged = _merge_intervals(intervals)
+                cur.execute("DELETE FROM series_cache_span WHERE series_id = %s", (series_id,))
+                if merged:
+                    cur.executemany(
+                        "INSERT INTO series_cache_span (series_id, span_start, span_end) "
+                        "VALUES (%s, %s, %s)",
+                        [(series_id, s, e) for s, e in merged],
+                    )
+
+    pg.run(_go)
 
 
 def update_cache_meta(pg: PgClient, series_id: str, row_count: int, l1_fp: str = "") -> None:
@@ -626,6 +686,55 @@ def update_cache_meta(pg: PgClient, series_id: str, row_count: int, l1_fp: str =
             updated_at = EXCLUDED.updated_at
         """,
         (series_id, series_id_to_cache_key(series_id), row_count, l1_fp, utcnow()),
+    )
+
+
+def clear_series_cache_registry(pg: PgClient, series_id: str) -> None:
+    """Drop L3 span + meta rows so the next fill rebuilds from L1."""
+    pg.execute("DELETE FROM series_cache_span WHERE series_id = %s", (series_id,))
+    pg.execute("DELETE FROM series_cache_meta WHERE series_id = %s", (series_id,))
+
+
+def update_series_trade_window(
+    pg: PgClient,
+    series_id: str,
+    first_seen: date,
+    last_seen: date,
+    *,
+    note: str = "dense_window_trim",
+) -> None:
+    """Rewrite listing window and stamp extras for audit."""
+    pg.execute(
+        """
+        UPDATE series_meta
+        SET first_seen = %s,
+            last_seen = %s,
+            extras = COALESCE(extras, '{}'::jsonb)
+                || jsonb_build_object(
+                    'window_trim', %s::text,
+                    'window_trim_at', %s::text
+                )
+        WHERE series_id = %s
+        """,
+        (first_seen, last_seen, note, utcnow().isoformat(), series_id),
+    )
+
+
+def quarantine_series(pg: PgClient, series_id: str, *, note: str) -> None:
+    """Mark series BAD_DATA (excluded from default ACTIVE recipes)."""
+    pg.execute(
+        """
+        UPDATE series_meta
+        SET status = 'BAD_DATA',
+            extras = COALESCE(extras, '{}'::jsonb)
+                || jsonb_build_object(
+                    'status_source', 'quality_repair',
+                    'status_note', %s::text,
+                    'quarantined_at', %s::text
+                )
+        WHERE series_id = %s
+        """,
+        (note, utcnow().isoformat(), series_id),
     )
 
 
@@ -673,7 +782,10 @@ def list_series_meta(pg: PgClient, spec: dict) -> list[dict]:
         f"""
         SELECT m.series_id, m.canonical_symbol, m.asset_class, m.status,
                m.first_seen, m.last_seen, m.gap_count, m.suspicious_count,
-               m.disagreement_count, m.quality_score, m.calendar_id, m.extras
+               m.disagreement_count, m.quality_score, m.calendar_id, m.extras,
+               m.flag_linear_ramp, m.flag_sparse_bridge, m.flag_flat_close,
+               m.flag_ohlc_violation, m.flag_non_positive_close,
+               m.flag_duplicate_ts, m.flag_extreme_return
         FROM series_meta m
         WHERE 1=1{where}
         ORDER BY m.asset_class, m.canonical_symbol, m.series_id

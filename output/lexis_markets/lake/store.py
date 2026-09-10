@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 from uuid import uuid4
+from queue import Empty, Full, LifoQueue
 
 import boto3
 import pandas as pd
@@ -42,7 +45,7 @@ __all__ = [
     "part_key",
     "months_in_range",
     "month_in_range",
-    "compacted_data_key",
+    "compacted_data_keys",
     "symbol_stats",
     "delete_prefix",
     "RAW_BAR_COLUMNS",
@@ -75,8 +78,19 @@ def _retry_s3(fn, *, attempts: int = _S3_ATTEMPTS, max_sleep: int = 20):
 
 
 class PgClient:
-    def __init__(self, url: str):
+    """Pooled psycopg client.
+
+    Reuses a small Lifo queue of connections per client instead of
+    connect/close per query. Cap via ``PG_POOL_MAX`` (default 4) so Ray
+    workers cannot open one socket per month ThreadPool worker.
+    """
+
+    def __init__(self, url: str, *, pool_max: int | None = None):
         self.url = url
+        self._pool_max = max(1, int(pool_max if pool_max is not None else os.environ.get("PG_POOL_MAX", "4")))
+        self._pool: LifoQueue = LifoQueue(maxsize=self._pool_max)
+        self._created = 0
+        self._lock = threading.Lock()
 
     def _retry(self, fn, *, attempts: int = _PG_ATTEMPTS):
         import psycopg
@@ -90,26 +104,125 @@ class PgClient:
                 time.sleep(min(2**i, 20))
         raise last
 
-    @contextmanager
-    def connect(self):
+    def _open(self):
         import psycopg
         from psycopg.rows import dict_row
 
-        conn = psycopg.connect(self.url, row_factory=dict_row)
+        return psycopg.connect(self.url, row_factory=dict_row)
+
+    def _acquire(self):
+        import psycopg
+
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+            except Empty:
+                with self._lock:
+                    if self._created < self._pool_max:
+                        self._created += 1
+                        return self._open()
+                conn = self._pool.get()
+            if conn.closed:
+                with self._lock:
+                    self._created = max(0, self._created - 1)
+                    if self._created < self._pool_max:
+                        self._created += 1
+                        return self._open()
+                continue
+            try:
+                if conn.info.transaction_status == psycopg.pq.TransactionStatus.INTRANS:
+                    conn.rollback()
+                return conn
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._created = max(0, self._created - 1)
+                    if self._created < self._pool_max:
+                        self._created += 1
+                        return self._open()
+
+    def _release(self, conn, *, discard: bool = False):
+        if discard or conn.closed:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._created = max(0, self._created - 1)
+            return
+        try:
+            self._pool.put_nowait(conn)
+        except Full:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._created = max(0, self._created - 1)
+
+    def close(self) -> None:
+        while True:
+            try:
+                conn = self._pool.get_nowait()
+            except Empty:
+                break
+            try:
+                conn.close()
+            except Exception:
+                pass
+        with self._lock:
+            self._created = 0
+
+    @contextmanager
+    def connect(self):
+        import psycopg
+
+        conn = self._acquire()
+        discard = False
         try:
             yield conn
             conn.commit()
-        except Exception:
-            conn.rollback()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                discard = True
+            if isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                discard = True
             raise
         finally:
-            conn.close()
+            self._release(conn, discard=discard)
 
     def execute(self, sql: str, params=None):
         def _go():
             with self.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)
+
+        return self._retry(_go)
+
+    def execute_autocommit(self, sql: str):
+        """Run a statement outside a transaction (ALTER SYSTEM, VACUUM, etc.)."""
+
+        def _go():
+            conn = self._acquire()
+            discard = False
+            try:
+                prev = conn.autocommit
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
+                finally:
+                    conn.autocommit = prev
+            except Exception:
+                discard = True
+                raise
+            finally:
+                self._release(conn, discard=discard)
 
         return self._retry(_go)
 
@@ -358,16 +471,39 @@ def month_in_range(y: int, m: int, start: date, end: date) -> bool:
     return (y, m) >= (start.year, start.month) and (y, m) <= (end.year, end.month)
 
 
-def compacted_data_key(lake: LakeStore, pg: PgClient, year: int, month: int) -> str | None:
-    row = pg.fetchone(
-        "SELECT compacted_key FROM l1_month_manifest WHERE year = %s AND month = %s",
-        (year, month),
+def compacted_data_keys(
+    lake: LakeStore,
+    pg: PgClient,
+    months: list[tuple[int, int]],
+) -> dict[tuple[int, int], str]:
+    """Resolve compacted L1 keys for many months in one PG round-trip (+ S3 fallback)."""
+    out: dict[tuple[int, int], str] = {}
+    if not months:
+        return out
+    years = [y for y, _ in months]
+    mos = [m for _, m in months]
+    rows = pg.fetchall(
+        """
+        SELECT m.year, m.month, l.compacted_key
+        FROM unnest(%s::int[], %s::int[]) AS m(year, month)
+        LEFT JOIN l1_month_manifest l ON l.year = m.year AND l.month = m.month
+        """,
+        (years, mos),
     )
-    if row:
-        return row["compacted_key"]
-    prefix = month_prefix(year, month)
-    keys = sorted(k for k in lake.list_keys(prefix) if "/compacted-" in k and k.endswith(".parquet"))
-    return keys[-1] if keys else None
+    missing: list[tuple[int, int]] = []
+    for r in rows:
+        ym = (int(r["year"]), int(r["month"]))
+        key = r.get("compacted_key")
+        if key:
+            out[ym] = key
+        else:
+            missing.append(ym)
+    for y, m in missing:
+        prefix = month_prefix(y, m)
+        keys = sorted(k for k in lake.list_keys(prefix) if "/compacted-" in k and k.endswith(".parquet"))
+        if keys:
+            out[(y, m)] = keys[-1]
+    return out
 
 
 def month_prefix(year: int, month: int) -> str:

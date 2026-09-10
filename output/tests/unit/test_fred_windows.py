@@ -113,3 +113,47 @@ def test_bisect_mid_prefers_middle_vintage_date():
     dates = [date(2020, 1, 15), date(2020, 6, 15), date(2020, 12, 1)]
     mid = _bisect_mid(start, end, dates)
     assert mid == date(2020, 6, 15)
+
+
+@pytest.mark.unit
+def test_fred_fetch_wrote_nothing_ignores_clamped_empty_jobs():
+    from lexis_markets.fred.tasks import _fred_fetch_wrote_nothing
+
+    clamped = [{"empty_after_clamp": True, "vintage_dates": []}]
+    assert _fred_fetch_wrote_nothing(clamped, ok=0, rows=0) is False
+    fetchable = [{"empty_after_clamp": False, "vintage_dates": ["2020-01-01"]}]
+    assert _fred_fetch_wrote_nothing(fetchable, ok=0, rows=0) is True
+    assert _fred_fetch_wrote_nothing(fetchable, ok=1, rows=10) is False
+
+
+@pytest.mark.unit
+def test_patch_macro_skips_zero_row_details():
+    from lexis_markets.registry.meta import patch_macro_eod_registry
+
+    class Pg:
+        def __init__(self):
+            self.rows = None
+
+        def executemany(self, _sql, rows):
+            self.rows = rows
+
+    pg = Pg()
+    out = patch_macro_eod_registry(
+        pg,
+        [
+            {"series_id": "macro:DFF", "vintage_through": "2026-09-08", "last": "2026-09-08", "rows": 10},
+            {"series_id": "macro:DJIA", "vintage_through": "2026-09-08", "rows": 0},
+        ],
+    )
+    assert out == {"updated": 1}
+    assert pg.rows == [(date(2026, 9, 8), "2026-09-08", "macro:DFF")]
+
+
+@pytest.mark.unit
+def test_seed_launches_fred_with_force():
+    import inspect
+
+    from lexis_markets.kaggle.seed import run_seed
+
+    src = inspect.getsource(run_seed)
+    assert "remote_fred_backfill.remote(cfg_d, compact=False, force=True)" in src

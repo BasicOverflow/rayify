@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from lexis_markets.config import MarketsConfig
@@ -19,8 +18,6 @@ def cli_main(description: str, run_fn) -> None:
 
     pg = PgClient(cfg.postgres_url)
     ensure_schema(pg)
-    if os.environ.get("MARKETS_RESET") == "1":
-        logger.info("MARKETS_RESET=1 set")
     try:
         out = run_fn(cfg)
         logger.info("done %s", out)

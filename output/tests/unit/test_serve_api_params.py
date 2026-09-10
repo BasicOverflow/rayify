@@ -44,8 +44,8 @@ def _bars(n: int = 40, *, start: str = "2020-01-02", volume: float = 100.0) -> p
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        (None, "as_of"),
-        ("", "as_of"),
+        (None, "latest"),
+        ("", "latest"),
         ("as_of", "as_of"),
         ("LATEST", "latest"),
         ("latest", "latest"),

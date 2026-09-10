@@ -1,8 +1,11 @@
 """Lake build-artifact purge and per-node Ray worker disk pruning.
 
-Worker prune runs once per alive Ray node (NodeAffinity). It drops stale
-``session_*`` dirs, truncates oversized session logs, and removes aged
-``runtime_resources`` so emptyDir / overlay boot disks do not fill up.
+Worker prune runs once per alive Ray node (NodeAffinity). It drops leftover
+``/tmp/lexis-*`` staging dirs (force-cancelled kaggle/seed), stale
+``session_*`` dirs, and truncates oversized session logs so emptyDir / overlay
+boot disks do not fill up. It does **not** age-delete ``runtime_resources``
+(pip / working_dir packages) — those URIs stay live in GCS and deleting them
+breaks workers.
 """
 from __future__ import annotations
 
@@ -14,7 +17,9 @@ import time
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from lexis_markets.ray.runtime import OPS_REMOTE_OPTS
 from lexis_markets.lake import LakeStore, PgClient, delete_prefix, month_prefix
+from lexis_markets.tmp_scratch import prune_orphan_tmp_dirs, dir_bytes
 from lexis_markets.kaggle.ingest import (
     JC_CACHE_KEY,
     JC_STAGING,
@@ -31,8 +36,8 @@ STAGING_SOURCES = (
     (JC_STAGING, JC_STAGING_MARKER, JC_CACHE_KEY),
 )
 
-DEFAULT_LOG_KEEP_BYTES = 50 * 1024 * 1024
-DEFAULT_LOG_TRIGGER_BYTES = 200 * 1024 * 1024
+DEFAULT_LOG_KEEP_MB = 20
+DEFAULT_LOG_TRIGGER_MB = 80
 
 
 def clear_kaggle_staging(lake: LakeStore, staging_prefix: str, staging_marker: str) -> int:
@@ -95,17 +100,6 @@ def purge_seed_build_artifacts(
     return out
 
 
-def _dir_bytes(path: str) -> int:
-    total = 0
-    for dp, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(dp, f))
-            except OSError:
-                pass
-    return total
-
-
 def _resolve_current_session(ray_tmp: str = "/tmp/ray") -> str | None:
     latest = os.path.join(ray_tmp, "session_latest")
     if os.path.islink(latest) or os.path.exists(latest):
@@ -126,7 +120,7 @@ def _prune_old_sessions(ray_tmp: str, current: str | None) -> tuple[int, int]:
         if current and os.path.realpath(path) == current:
             continue
         try:
-            freed += _dir_bytes(path)
+            freed += dir_bytes(path)
             shutil.rmtree(path, ignore_errors=True)
             removed += 1
         except OSError:
@@ -170,48 +164,42 @@ def _truncate_large_logs(
 
 
 def _prune_runtime_resources(session_dir: str, cutoff: float) -> tuple[int, int]:
-    removed = 0
-    freed = 0
-    rt = os.path.join(session_dir, "runtime_resources")
-    if not os.path.isdir(rt):
-        return 0, 0
-    for name in os.listdir(rt):
-        path = os.path.join(rt, name)
-        try:
-            if os.path.getmtime(path) >= cutoff:
-                continue
-            if os.path.isdir(path):
-                freed += _dir_bytes(path)
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                freed += os.path.getsize(path)
-                os.remove(path)
-            removed += 1
-        except OSError:
-            pass
-    return removed, freed
+    """Intentionally a no-op.
+
+    Age-deleting ``runtime_resources/{pip,working_dir_files}/...`` while Ray GCS
+    still holds those URIs makes new workers die with
+    ``cd: .../runtime_resources/...: No such file or directory`` (and stale
+    ``pip://`` hashes). Ray owns package GC; we only drop whole old ``session_*``
+    trees and trim logs.
+    """
+    return 0, 0
 
 
-@ray.remote(num_cpus=0.01, memory=64 * 1024 * 1024)
+@ray.remote(num_cpus=0.01, memory=64 * 1024 * 1024, **OPS_REMOTE_OPTS)
 def _prune_worker_tmp(
     max_age_s: int = 3600,
-    max_log_mb: int = 200,
-    log_keep_mb: int = 50,
+    max_log_mb: int = DEFAULT_LOG_TRIGGER_MB,
+    log_keep_mb: int = DEFAULT_LOG_KEEP_MB,
     drop_old_sessions: bool = True,
 ) -> dict:
+    orphan_n, orphan_b = prune_orphan_tmp_dirs("/tmp")
+    freed = orphan_b
     ray_tmp = "/tmp/ray"
     if not os.path.isdir(ray_tmp):
         return {
             "node_ip": ray.util.get_node_ip_address(),
             "skipped": "no_/tmp/ray",
-            "freed_mb": 0.0,
+            "orphan_tmp_removed": orphan_n,
+            "sessions_removed": 0,
+            "logs_trimmed": 0,
+            "runtime_resources_removed": 0,
+            "freed_mb": round(freed / (1024 * 1024), 1),
         }
 
     current = _resolve_current_session(ray_tmp)
     sessions_removed = 0
     logs_trimmed = 0
     rr_removed = 0
-    freed = 0
 
     if drop_old_sessions:
         n, b = _prune_old_sessions(ray_tmp, current)
@@ -226,6 +214,7 @@ def _prune_worker_tmp(
         )
         logs_trimmed = n
         freed += b
+        # cutoff kept for API compat; runtime_resources are never age-deleted
         n, b = _prune_runtime_resources(current, time.time() - max_age_s)
         rr_removed = n
         freed += b
@@ -233,6 +222,7 @@ def _prune_worker_tmp(
     return {
         "node_ip": ray.util.get_node_ip_address(),
         "current_session": os.path.basename(current) if current else None,
+        "orphan_tmp_removed": orphan_n,
         "sessions_removed": sessions_removed,
         "logs_trimmed": logs_trimmed,
         "runtime_resources_removed": rr_removed,
@@ -243,8 +233,8 @@ def _prune_worker_tmp(
 def prune_ray_worker_disk(
     *,
     max_age_s: int = 3600,
-    max_log_mb: int = 200,
-    log_keep_mb: int = 50,
+    max_log_mb: int = DEFAULT_LOG_TRIGGER_MB,
+    log_keep_mb: int = DEFAULT_LOG_KEEP_MB,
     drop_old_sessions: bool = True,
 ) -> list[dict]:
     """Pin a prune task on every alive node and return per-node stats.

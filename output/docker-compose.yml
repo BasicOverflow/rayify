@@ -4,7 +4,6 @@ services:
     env_file:
       - ../.env
     environment:
-      MARKETS_RESET: ${MARKETS_RESET:-}
       MARKETS_DEV_YF_LIMIT: ${MARKETS_DEV_YF_LIMIT:-}
       MARKETS_DEV_FRED_LIMIT: ${MARKETS_DEV_FRED_LIMIT:-}
       EOD_CHUNK_SIZE: ${EOD_CHUNK_SIZE:-}

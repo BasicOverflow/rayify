@@ -6,11 +6,12 @@ import ray
 from lexis_markets.fred.alfred import AdaptiveWindowDays
 from lexis_markets.domain.gates import FredGate, YfinanceGate
 from lexis_markets.logging_setup import configure_logging
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
 
 configure_logging()
 
 
-@ray.remote(max_concurrency=1)
+@ray.remote(max_concurrency=1, **DEFAULT_REMOTE_OPTS)
 class YfinanceGateActor:
     def __init__(
         self,
@@ -18,9 +19,9 @@ class YfinanceGateActor:
         max_interval: float = 30.0,
         backoff_factor: float = 2.0,
         recovery_step: float = 0.1,
-        chunk_size: int = 150,
+        chunk_size: int = 250,
         min_chunk_size: int = 30,
-        start_slop_days: int = 150,
+        start_slop_days: int = 365,
         min_start_slop_days: int = 30,
     ):
         self._gate = YfinanceGate(
@@ -50,7 +51,7 @@ class YfinanceGateActor:
         return self._gate.batch_knobs()
 
 
-@ray.remote(max_concurrency=1)
+@ray.remote(max_concurrency=1, **DEFAULT_REMOTE_OPTS)
 class FredGateActor:
     def __init__(
         self,

@@ -11,12 +11,34 @@ from lexis_markets.logging_setup import get_logger
 
 logger = get_logger("ray.runtime")
 
+# Lexis default: SPREAD is the high-level Ray strategy for cross-node fan-out.
+# Do not round-robin NodeAffinity — Ray docs call that a last-resort low-level
+# escape hatch that blocks scheduler optimizations.
+#
+# Placement constraints (Ray-supported):
+# - label_selector !headgroup: workload workers carry ray.io/node-group; head is
+#   headgroup; vram-monitor pods have no node-group and do not match.
+# - IO tasks request a tiny CPU > 0: vram monitors advertise memory only (no CPU),
+#   so they are hard-infeasible. num_cpus=0 would be schedulable on them.
+# Ops that must pin to head / every node (Serve restart, disk prune) use
+# OPS_REMOTE_OPTS — no label_selector — plus explicit NodeAffinity.
+WORKER_LABEL_SELECTOR = {"ray.io/node-group": "!headgroup"}
+DEFAULT_REMOTE_OPTS = {
+    "scheduling_strategy": "SPREAD",
+    "label_selector": WORKER_LABEL_SELECTOR,
+}
+OPS_REMOTE_OPTS = {"scheduling_strategy": "SPREAD"}
+IO_TASK_CPUS = 0.001
+IO_REMOTE_OPTS = {**DEFAULT_REMOTE_OPTS, "num_cpus": IO_TASK_CPUS}
+CPU_REMOTE_OPTS = {**DEFAULT_REMOTE_OPTS, "num_cpus": 1}
+
 WORKER_PIP = [
     "pandas", "pyarrow", "requests", "boto3", "psycopg[binary]", "python-dotenv",
     "fastapi==0.116.0", "starlette==0.46.2", "pydantic", "yfinance",
     # Bump these when the cluster pip URI cache goes stale (missing virtualenv for hashed URI).
     "certifi>=2025.8.3",
     "packaging>=25.0",
+    "urllib3>=2.5.0",
 ]
 RUNTIME_EXCLUDES = [
     "cli/**", "**/__pycache__/**", "**/*.pyc", "**/*.png", "**/*.log", "**/*.csv",
@@ -45,8 +67,18 @@ def _pip_cache_miss(exc: BaseException) -> bool:
 
 def _worker_env_vars(cfg: MarketsConfig) -> dict[str, str]:
     env: dict[str, str] = {}
+    if cfg.ray_namespace:
+        env["RAY_NAMESPACE"] = cfg.ray_namespace
     if cfg.lake_prefix:
         env["MARKETS_LAKE_PREFIX"] = cfg.lake_prefix
+    for key in (
+        "QUALITY_INLINE_REPAIR",
+        "STITCH_MONTH_WORKERS",
+        "PG_POOL_MAX",
+    ):
+        val = os.environ.get(key)
+        if val is not None and val != "":
+            env[key] = val
     if cfg.test.enabled:
         env["MARKETS_TEST_PROFILE"] = "1"
         env["MARKETS_TEST_YF_LIMIT"] = str(cfg.test.yf_limit)
@@ -145,10 +177,5 @@ def ray_cluster_ready() -> bool:
 
 
 def max_in_flight() -> int:
-    """Upper bound on concurrent Ray tasks (~85% of cluster CPUs)."""
-    try:
-        resources = ray.cluster_resources()
-        cpus = float(resources.get("CPU", 4))
-        return max(4, int(cpus * 0.85))
-    except Exception:
-        return 8
+    """Pending-task cap. 0 = unlimited; Ray schedules by CPU, no headroom fraction."""
+    return 0

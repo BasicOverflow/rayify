@@ -47,8 +47,10 @@ def _bars_two_series() -> pd.DataFrame:
 
 @pytest.mark.unit
 def test_parse_dataset_mode():
-    assert parse_dataset_mode(None) == "range"
+    assert parse_dataset_mode(None) == "range_panel"
+    assert parse_dataset_mode("range") == "range_panel"
     assert parse_dataset_mode("EOD_SNAPSHOT") == "eod_snapshot"
+    assert parse_dataset_mode("wide_matrix") == "wide_matrix"
     with pytest.raises(ValueError, match="mode must be"):
         parse_dataset_mode("weekly")
 
@@ -57,6 +59,15 @@ def test_parse_dataset_mode():
 def test_normalize_range_requires_bounds():
     with pytest.raises(ValueError, match="start and end"):
         normalize_query_spec({"mode": "range"})
+
+
+@pytest.mark.unit
+def test_normalize_range_defaults_l3_latest():
+    out = normalize_query_spec(
+        {"mode": "range_panel", "start": "2020-01-01", "end": "2020-06-01"}
+    )
+    assert out["mode"] == "range_panel"
+    assert out["revision_mode"] == "latest"
 
 
 @pytest.mark.unit

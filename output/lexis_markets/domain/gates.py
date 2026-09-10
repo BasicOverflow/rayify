@@ -52,9 +52,9 @@ class YfinanceGate:
         max_interval: float = 30.0,
         backoff_factor: float = 2.0,
         recovery_step: float = 0.1,
-        chunk_size: int = 150,
+        chunk_size: int = 250,
         min_chunk_size: int = 30,
-        start_slop_days: int = 150,
+        start_slop_days: int = 365,
         min_start_slop_days: int = 30,
         grow_after: int = 3,
     ):

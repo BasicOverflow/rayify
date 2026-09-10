@@ -1,1 +1,1 @@
-"""Equity/ETF EOD ingest and scheduled quality scans."""
+"""Equity/ETF EOD ingest, align, seed cluster materialize, and Serve tip warm."""

@@ -18,13 +18,18 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-SOURCE_PRIORITY = ("jakewright", "jacksoncrow", "marketparquet", "yfinance", "fred")
+SOURCE_PRIORITY = ("jakewright", "marketparquet", "yfinance", "jacksoncrow", "fred")
 # Sources whose gaps may be scaled onto the prior segment during stitch calibration.
-FILL_SOURCES = frozenset({"marketparquet", "yfinance"})
+# jacksoncrow fills jakewright holes and must not land unscaled.
+FILL_SOURCES = frozenset({"marketparquet", "yfinance", "jacksoncrow"})
 PRICE_COLS = ("open", "high", "low", "close")
 CALIBRATION_MIN_RATIO = 0.5
-CALIBRATION_MAX_RATIO = 2.0
+# Allow ~2:1 JC/YF denomination mismatches (e.g. VTWO 2020-04); reject larger cliffs
+# unless the ratio is a known split factor (2, 3, 4, …).
+CALIBRATION_MAX_RATIO = 2.5
 CALIBRATION_MIN_OVERLAP_DAYS = 2
+CALIBRATION_SPLIT_FACTORS = (2, 3, 4, 5, 6, 8, 10)
+CALIBRATION_SPLIT_TOL = 0.08
 
 DEFAULT_FRED_SERIES = (
     # rates / policy / curves
@@ -70,9 +75,9 @@ FRED_MAX_IN_FLIGHT_DEFAULT = 28
 EOD_MAX_IN_FLIGHT_DEFAULT = 0
 FRED_SERIES_PER_TASK_DEFAULT = 1
 EOD_PACE_SECONDS_DEFAULT = 2.5
-EOD_CHUNK_SIZE_DEFAULT = 150
+EOD_CHUNK_SIZE_DEFAULT = 250
 EOD_CHUNK_SIZE_MIN_DEFAULT = 30
-EOD_START_SLOP_DAYS_DEFAULT = 150
+EOD_START_SLOP_DAYS_DEFAULT = 365
 EOD_START_SLOP_DAYS_MIN_DEFAULT = 30
 YF_PACE_MAX_SECONDS_DEFAULT = 30.0
 YF_WAVE_JOBS_DEFAULT = 8

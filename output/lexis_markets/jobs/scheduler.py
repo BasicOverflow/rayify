@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import ray
 
@@ -39,7 +39,14 @@ def chunks(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def run_batches(label: str, items: list, submit_fn: Callable, shape: TaskShape) -> list:
+def run_batches(
+    label: str,
+    items: list,
+    submit_fn: Callable,
+    shape: TaskShape,
+    *,
+    on_batch_done: Callable[[Any], None] | None = None,
+) -> list:
     batches = chunks(items, shape.batch_size)
     total_batches = len(batches)
     total_items = len(items)
@@ -50,6 +57,13 @@ def run_batches(label: str, items: list, submit_fn: Callable, shape: TaskShape) 
     done_items = 0
     t0 = time.perf_counter()
     cap = shape.max_in_flight if shape.max_in_flight > 0 else len(batches)
+    logger.info(
+        "%s start batches=%s items=%s max_in_flight=%s",
+        label,
+        total_batches,
+        total_items,
+        shape.max_in_flight if shape.max_in_flight > 0 else "unlimited",
+    )
     while next_i < len(batches) or pending:
         while next_i < len(batches) and len(pending) < cap:
             pending.append(submit_fn(batches[next_i]))
@@ -57,6 +71,8 @@ def run_batches(label: str, items: list, submit_fn: Callable, shape: TaskShape) 
         ready, pending = ray.wait(pending, num_returns=1)
         batch = ray.get(ready[0])
         results.append(batch)
+        if on_batch_done is not None:
+            on_batch_done(batch)
         done_batches += 1
         done_items += len(batch) if isinstance(batch, list) else 1
         elapsed = time.perf_counter() - t0

@@ -1,15 +1,14 @@
-"""ET market-hours cron: seed, ASAP historical catch-up, daily EOD, quality, disk prune.
+"""ET market-hours cron: seed, ASAP historical catch-up, daily EOD, disk prune.
 
-On first start (or after ``MARKETS_RESET=1``), enqueues a one-time seed job.
+On first start (empty lake / no seed_complete marker), enqueues a one-time seed job.
 
 After seed: missing history through the day *before* the latest session target is
 enqueued immediately (EOD + FRED). Only the latest session day's EOD waits for the
-post-close window (16:00 ET + ``MARKETS_EOD_DELAY_HOURS``). Quality stays on that
-same window. Worker disk prune runs on a fixed interval.
+post-close window (16:00 ET + ``MARKETS_EOD_DELAY_HOURS``). Worker disk prune runs
+on a fixed interval.
 """
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,7 +26,7 @@ logger = get_logger("supervisor.cron")
 
 ET = ZoneInfo("America/New_York")
 MARKET_CLOSE = time(16, 0)  # NYSE regular session close (ET)
-DISK_PRUNE_EVERY = timedelta(hours=6)
+DISK_PRUNE_EVERY = timedelta(hours=1)
 
 
 def _now_et(now: datetime | None = None) -> datetime:
@@ -82,27 +81,14 @@ def pipeline_ready(cfg: MarketsConfig, state: SupervisorState) -> bool:
     return is_seed_complete(cfg) and not state.has_active_job("seed")
 
 
-def _reset_seed_already_done(state: SupervisorState, cfg: MarketsConfig) -> bool:
-    """True when a MARKETS_RESET=1 seed already finished and lake is populated."""
-    last = state.get_last_run("seed")
-    if not last or not last.get("detail", {}).get("reset"):
-        return False
-    return is_seed_complete(cfg)
-
-
 def maybe_schedule_seed(cfg: MarketsConfig, state: SupervisorState) -> bool:
     if state.has_active_job("seed"):
         return False
-
-    reset = os.environ.get("MARKETS_RESET") == "1"
-    if reset:
-        if _reset_seed_already_done(state, cfg):
-            return False
-    elif is_seed_complete(cfg):
+    if is_seed_complete(cfg):
         return False
 
-    state.enqueue_pending("seed", {"reset": reset})
-    logger.info("cron scheduled seed reset=%s", reset)
+    state.enqueue_pending("seed", {})
+    logger.info("cron scheduled seed")
     return True
 
 
@@ -249,25 +235,6 @@ def maybe_schedule_eod(cfg: MarketsConfig, state: SupervisorState, now: datetime
     return True
 
 
-def maybe_schedule_quality(cfg: MarketsConfig, state: SupervisorState, now: datetime | None = None) -> bool:
-    now_et = _now_et(now)
-    run_key = f"quality:{now_et.date().isoformat()}"
-    last = state.get_last_run("quality")
-    if last and last.get("detail", {}).get("run_key") == run_key:
-        return False
-
-    if not eod_window_open(cfg, now):
-        return False
-
-    payload: dict = {"run_key": run_key}
-    if cfg.test.enabled:
-        payload["limit"] = cfg.test.quality_limit
-    state.enqueue_pending("quality", payload)
-    state.record_last_run("quality", {"scheduled": True, "run_key": run_key})
-    logger.info("cron scheduled quality run_key=%s", run_key)
-    return True
-
-
 def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
         return None
@@ -278,7 +245,7 @@ def _parse_iso(ts: str | None) -> datetime | None:
 
 
 def maybe_prune_worker_disk(state: SupervisorState, now: datetime | None = None) -> dict | None:
-    """Drop stale Ray sessions / trim huge logs on every alive node every DISK_PRUNE_EVERY."""
+    """Drop leftover /tmp/lexis-* staging, stale Ray sessions, and huge logs every DISK_PRUNE_EVERY."""
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
@@ -318,14 +285,12 @@ def cron_tick(cfg: MarketsConfig, state: SupervisorState, now: datetime | None =
             "eod_catchup_scheduled": False,
             "fred_catchup_scheduled": False,
             "eod_scheduled": False,
-            "quality_scheduled": False,
             "disk_prune": disk_prune,
         }
 
     eod_catchup = maybe_schedule_eod_catchup(cfg, state, now)
     fred_catchup = maybe_schedule_fred_catchup(cfg, state, now)
     eod = maybe_schedule_eod(cfg, state, now)
-    quality = maybe_schedule_quality(cfg, state, now)
     return {
         "markets": markets.to_log_dict(),
         "seed_scheduled": seed_scheduled,
@@ -333,6 +298,5 @@ def cron_tick(cfg: MarketsConfig, state: SupervisorState, now: datetime | None =
         "eod_catchup_scheduled": eod_catchup,
         "fred_catchup_scheduled": fred_catchup,
         "eod_scheduled": eod,
-        "quality_scheduled": quality,
         "disk_prune": disk_prune,
     }

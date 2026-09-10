@@ -6,15 +6,16 @@ from datetime import date
 
 import ray
 
-from lexis_markets.lake import LakeStore, PgClient
+from lexis_markets.lake import PgClient, open_lake, seed_scratch_scope
+from lexis_markets.lake.cluster import SEED_SCRATCH_KEY
 from lexis_markets.config import MarketsConfig
 from lexis_markets.logging_setup import get_logger
 from lexis_markets.ray.markets_actors import get_fred_gate_actor
 from lexis_markets.jobs.scheduler import timed
 from lexis_markets.kaggle.compact import compact_months, months_from_details
 from lexis_markets.fred.tasks import ingest_fred_vintage_jobs
-from lexis_markets.kaggle.lifecycle import delete_l1_parts_for_month
 from lexis_markets.registry import resolve_fred_backfill_jobs
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
 
 logger = get_logger("pipelines.fred_backfill")
 
@@ -32,7 +33,7 @@ def run_fred_backfill(
 
     gate = get_fred_gate_actor(cfg)
     target = vintage_end or eod_target_date()
-    lake = LakeStore(cfg)
+    lake = open_lake(cfg)
     pg = PgClient(cfg.postgres_url)
     jobs = resolve_fred_backfill_jobs(
         pg,
@@ -64,8 +65,6 @@ def run_fred_backfill(
     if compact and months:
         with timed("fred_backfill_compact"):
             compact_months(cfg, months)
-        for y, m in months:
-            delete_l1_parts_for_month(lake, pg, y, m)
 
     elapsed = time.perf_counter() - t0
     logger.info(
@@ -84,7 +83,8 @@ def run_fred_backfill(
     }
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def remote_fred_backfill(cfg_d: dict, *, force: bool = False, compact: bool = True) -> dict:
     cfg = MarketsConfig.from_dict(cfg_d)
-    return run_fred_backfill(cfg, force=force, compact=compact)
+    with seed_scratch_scope(bool(cfg_d.get(SEED_SCRATCH_KEY))):
+        return run_fred_backfill(cfg, force=force, compact=compact)

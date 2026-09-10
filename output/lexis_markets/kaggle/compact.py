@@ -14,10 +14,13 @@ from lexis_markets.lake import (
     normalize_raw_bars,
     utcnow,
     write_parquet_lake,
+    lake_from_cfg_d,
+    cfg_d_with_scratch,
 )
 from lexis_markets.config import MarketsConfig
 from lexis_markets.domain.raw_bar import RAW_BAR_COLUMNS
 from lexis_markets.jobs.scheduler import plan_task_resources, run_batches
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
 
 
 def compacted_key(year: int, month: int, run_id: str) -> str:
@@ -32,17 +35,21 @@ def _month_keys(lake: LakeStore, year: int, month: int) -> tuple[list[str], list
     return parts, compacted
 
 
-def compact_month(lake: LakeStore, pg: PgClient, year: int, month: int) -> dict:
+def load_month_raw_bars(lake: LakeStore, year: int, month: int) -> pd.DataFrame:
+    """Merge part + compacted parquet for a month (empty if the prefix has none)."""
     parts, compacted = _month_keys(lake, year, month)
-    if not parts:
-        return {"year": year, "month": month, "rows": 0, "skipped": True}
     read_keys = parts + compacted[-1:]
-
+    if not read_keys:
+        return pd.DataFrame()
     frames = lake.get_dfs_parquet_parallel(read_keys)
     df = normalize_raw_bars(pd.concat(frames, ignore_index=True))
     df = df.sort_values(["source_symbol", "source", "ts", "fetched_at"])
-    df = df.drop_duplicates(subset=["source", "source_symbol", "ts"], keep="last")
+    return df.drop_duplicates(subset=["source", "source_symbol", "ts"], keep="last")
 
+
+def persist_month_frame(lake: LakeStore, pg: PgClient, year: int, month: int, df: pd.DataFrame) -> dict:
+    """Write one compacted month file, drop prior parts/compacted, stamp coverage."""
+    parts, compacted = _month_keys(lake, year, month)
     run_id = uuid4().hex[:12]
     out_key = compacted_key(year, month, run_id)
     write_parquet_lake(
@@ -51,11 +58,9 @@ def compact_month(lake: LakeStore, pg: PgClient, year: int, month: int) -> dict:
         df[RAW_BAR_COLUMNS],
         sort_by=["source_symbol", "source", "ts", "fetched_at"],
     )
-
-    delete_keys = parts + compacted
+    delete_keys = [k for k in parts + compacted if k != out_key]
     if delete_keys:
         lake.delete_keys(delete_keys)
-
     cov_rows = []
     sym_df = df[["source", "source_symbol"]].drop_duplicates()
     for r in sym_df.itertuples(index=False):
@@ -83,10 +88,20 @@ def compact_month(lake: LakeStore, pg: PgClient, year: int, month: int) -> dict:
     return {"year": year, "month": month, "rows": len(df), "key": out_key, "deleted": len(delete_keys)}
 
 
-@ray.remote
+def compact_month(lake: LakeStore, pg: PgClient, year: int, month: int) -> dict:
+    parts, _compacted = _month_keys(lake, year, month)
+    if not parts:
+        return {"year": year, "month": month, "rows": 0, "skipped": True}
+    df = load_month_raw_bars(lake, year, month)
+    if df.empty:
+        return {"year": year, "month": month, "rows": 0, "skipped": True}
+    return persist_month_frame(lake, pg, year, month, df)
+
+
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def task_compact_month_batch(cfg_d: dict, months: list[tuple[int, int]]) -> list[dict]:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     pg = PgClient(cfg.postgres_url)
     return [compact_month(lake, pg, y, m) for y, m in months]
 
@@ -95,7 +110,7 @@ def compact_months(cfg: MarketsConfig, months: list[tuple[int, int]]) -> list[di
     months = sorted(set(months))
     if not months:
         return []
-    cfg_d = cfg.to_dict()
+    cfg_d = cfg_d_with_scratch(cfg)
     shape = plan_task_resources(batch_size=4)
     batches = run_batches(
         "compact",
@@ -104,13 +119,6 @@ def compact_months(cfg: MarketsConfig, months: list[tuple[int, int]]) -> list[di
         shape,
     )
     return [row for batch in batches for row in batch]
-
-
-def months_from_df(df: pd.DataFrame) -> list[tuple[int, int]]:
-    if df.empty:
-        return []
-    ts = pd.to_datetime(df["ts"])
-    return sorted({(int(y), int(m)) for y, m in zip(ts.dt.year, ts.dt.month)})
 
 
 def months_from_details(details: list[dict]) -> list[tuple[int, int]]:

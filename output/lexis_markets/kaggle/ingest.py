@@ -1,8 +1,6 @@
 """Ray remote tasks: L1 bulk ingest (jakewright, jacksoncrow)."""
 from __future__ import annotations
 
-import json
-import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -14,11 +12,13 @@ import pyarrow.parquet as pq
 import ray
 import requests
 
-from lexis_markets.lake import LakeStore, L1Writer, get_json, put_json, delete_prefix
+from lexis_markets.lake import LakeStore, L1Writer, get_json, put_json, delete_prefix, lake_from_cfg_d, cfg_d_with_scratch
 from lexis_markets.config import MarketsConfig
 from lexis_markets.domain.sources.mappers import map_ohlcv, merge_details
 from lexis_markets.logging_setup import get_logger
 from lexis_markets.jobs.scheduler import plan_task_resources, run_batches
+from lexis_markets.ray.runtime import DEFAULT_REMOTE_OPTS
+from lexis_markets.tmp_scratch import scratch_dir
 
 logger = get_logger("kaggle.ingest")
 
@@ -36,8 +36,6 @@ BATCH_ROWS = 250_000
 FILES_PER_CHUNK = 40
 
 __all__ = [
-    "JAKEWRIGHT",
-    "JACKSONCROW",
     "JC_CACHE_KEY",
     "JW_CACHE_KEY",
     "JW_MARKER",
@@ -46,16 +44,10 @@ __all__ = [
     "JC_STAGING",
     "JW_STAGING_MARKER",
     "JC_STAGING_MARKER",
-    "BATCH_ROWS",
-    "FILES_PER_CHUNK",
     "cache_kaggle_zip",
     "clear_staging_after_ingest",
     "ingest_jacksoncrow",
     "ingest_jakewright",
-    "ingest_raydata",
-    "ingest_staging_parts",
-    "prepare_jacksoncrow_staging",
-    "prepare_jakewright_staging",
 ]
 
 
@@ -77,8 +69,8 @@ def cache_kaggle_zip(lake: LakeStore, dataset: str, token: str, cache_key: str) 
     url = f"https://www.kaggle.com/api/v1/datasets/download/{dataset}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True, timeout=600)
     resp.raise_for_status()
-    with tempfile.TemporaryDirectory(prefix="lexis-kaggle-") as tmp:
-        zpath = Path(tmp) / "dataset.zip"
+    with scratch_dir("lexis-kaggle-") as tmp:
+        zpath = tmp / "dataset.zip"
         with open(zpath, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 20):
                 if chunk:
@@ -88,13 +80,13 @@ def cache_kaggle_zip(lake: LakeStore, dataset: str, token: str, cache_key: str) 
 
 
 def _write(cfg_d: dict, run_id: str, mapped: pd.DataFrame) -> list[dict]:
-    lake = LakeStore(MarketsConfig.from_dict(cfg_d))
+    lake = lake_from_cfg_d(cfg_d)
     return L1Writer(lake, run_id=run_id).write_parts(mapped, shard=uuid4().hex[:8])["details"]
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def ingest_staging_parts(cfg_d: dict, keys: list[str], run_id: str, source: str) -> list[dict]:
-    lake = LakeStore(MarketsConfig.from_dict(cfg_d))
+    lake = lake_from_cfg_d(cfg_d)
     details: list[dict] = []
     for key in keys:
         raw = lake.get_df_parquet(key)
@@ -116,7 +108,6 @@ def ingest_raydata(
     marker_key: str,
     staging_prefix: str,
     staging_marker: str,
-    cache_key: str,
     prepare_fn,
     source: str,
 ) -> dict:
@@ -137,7 +128,7 @@ def ingest_raydata(
         )
         return out
 
-    cfg_d = cfg.to_dict()
+    cfg_d = cfg_d_with_scratch(cfg)
     n_parts = int(ray.get(prepare_fn.remote(cfg_d)))
     keys = sorted(lake.list_keys(staging_prefix))
     run_id = uuid4().hex[:12]
@@ -187,16 +178,15 @@ def _member_data_name(zf: zipfile.ZipFile) -> str:
     return names[0]
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def prepare_jakewright_staging(cfg_d: dict) -> int:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     if lake.exists(JW_STAGING_MARKER):
         return int(get_json(lake, JW_STAGING_MARKER)["parts"])
     cache_kaggle_zip(lake, JAKEWRIGHT, cfg.kaggle_api_token, JW_CACHE_KEY)
     parts = 0
-    with tempfile.TemporaryDirectory(prefix="lexis-jw-stage-") as tmp:
-        tmp = Path(tmp)
+    with scratch_dir("lexis-jw-stage-") as tmp:
         zpath = tmp / "dataset.zip"
         lake.download_file(JW_CACHE_KEY, zpath)
         with zipfile.ZipFile(zpath, "r") as zf:
@@ -208,39 +198,43 @@ def prepare_jakewright_staging(cfg_d: dict) -> int:
                     if not buf:
                         break
                     dst.write(buf)
+        zpath.unlink(missing_ok=True)
         if data_path.suffix == ".parquet":
             pf = pq.ParquetFile(data_path)
             for i, batch in enumerate(pf.iter_batches(batch_size=BATCH_ROWS)):
                 part = tmp / f"part-{i:05d}.parquet"
                 pq.write_table(pa.Table.from_batches([batch]), part)
                 lake.put_file(f"{JW_STAGING}part-{i:05d}.parquet", part)
+                part.unlink(missing_ok=True)
                 parts += 1
         else:
             for i, chunk in enumerate(pd.read_csv(data_path, chunksize=BATCH_ROWS)):
                 part = tmp / f"part-{i:05d}.parquet"
                 chunk.to_parquet(part, index=False)
                 lake.put_file(f"{JW_STAGING}part-{i:05d}.parquet", part)
+                part.unlink(missing_ok=True)
                 parts += 1
+        data_path.unlink(missing_ok=True)
     put_json(lake, JW_STAGING_MARKER, {"parts": parts})
     logger.info("jakewright staging: %s parts -> %s", parts, JW_STAGING)
     return parts
 
 
-@ray.remote
+@ray.remote(**DEFAULT_REMOTE_OPTS)
 def prepare_jacksoncrow_staging(cfg_d: dict) -> int:
     cfg = MarketsConfig.from_dict(cfg_d)
-    lake = LakeStore(cfg)
+    lake = lake_from_cfg_d(cfg_d)
     if lake.exists(JC_STAGING_MARKER):
         return int(get_json(lake, JC_STAGING_MARKER)["parts"])
     cache_kaggle_zip(lake, JACKSONCROW, cfg.kaggle_api_token, JC_CACHE_KEY)
     parts = 0
-    with tempfile.TemporaryDirectory(prefix="lexis-jc-stage-") as tmp:
-        tmp = Path(tmp)
+    with scratch_dir("lexis-jc-stage-") as tmp:
         zpath = tmp / "dataset.zip"
         lake.download_file(JC_CACHE_KEY, zpath)
         root = tmp / "data"
         with zipfile.ZipFile(zpath, "r") as zf:
             zf.extractall(root)
+        zpath.unlink(missing_ok=True)
         files: list[tuple[Path, str]] = []
         for path in sorted(root.rglob("*.csv")):
             parent = path.parent.name.lower()
@@ -266,10 +260,12 @@ def prepare_jacksoncrow_staging(cfg_d: dict) -> int:
                         series_type=stype,
                     )
                 )
+                path.unlink(missing_ok=True)
             mapped = pd.concat(frames, ignore_index=True)
             part = tmp / f"part-{parts:05d}.parquet"
             mapped.to_parquet(part, index=False)
             lake.put_file(f"{JC_STAGING}part-{parts:05d}.parquet", part)
+            part.unlink(missing_ok=True)
             parts += 1
     put_json(lake, JC_STAGING_MARKER, {"parts": parts})
     logger.info("jacksoncrow staging: %s parts -> %s", parts, JC_STAGING)
@@ -284,7 +280,6 @@ def ingest_jakewright(cfg: MarketsConfig, lake: LakeStore) -> dict:
         marker_key=JW_MARKER,
         staging_prefix=JW_STAGING,
         staging_marker=JW_STAGING_MARKER,
-        cache_key=JW_CACHE_KEY,
         prepare_fn=prepare_jakewright_staging,
         source="jakewright",
     )
@@ -298,7 +293,6 @@ def ingest_jacksoncrow(cfg: MarketsConfig, lake: LakeStore) -> dict:
         marker_key=JC_MARKER,
         staging_prefix=JC_STAGING,
         staging_marker=JC_STAGING_MARKER,
-        cache_key=JC_CACHE_KEY,
         prepare_fn=prepare_jacksoncrow_staging,
         source="jacksoncrow",
     )

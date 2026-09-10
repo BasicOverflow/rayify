@@ -1,12 +1,13 @@
 """Unit guard: equity ingest_eod must honor cron target_date."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
 from lexis_markets.eod import ingest as eod_ingest
+from lexis_markets.jobs.clock import as_date
 
 
 @pytest.mark.unit
@@ -36,3 +37,12 @@ def test_ingest_eod_uses_explicit_target_date(monkeypatch):
 @pytest.mark.unit
 def test_as_of_today_is_day_after_target():
     assert eod_ingest._as_of_today(date(2025, 3, 10)) == date(2025, 3, 11)
+
+
+@pytest.mark.unit
+def test_as_date_coerces_common_inputs():
+    assert as_date(None) is None
+    assert as_date(date(2025, 3, 10)) == date(2025, 3, 10)
+    assert as_date(datetime(2025, 3, 10, 16, 0)) == date(2025, 3, 10)
+    assert as_date("2025-03-10") == date(2025, 3, 10)
+    assert as_date("2025-03-10T16:00:00Z") == date(2025, 3, 10)

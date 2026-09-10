@@ -81,7 +81,3 @@ def fetch_nasdaq_directory() -> NasdaqDirectory:
     for sym, entry in _parse_other_listed(other.text).by_symbol.items():
         out.add(sym, entry.exchange, entry.etf)
     return out
-
-
-def fetch_nasdaq_listed_symbols() -> set[str]:
-    return fetch_nasdaq_directory().symbols

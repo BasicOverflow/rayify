@@ -3,7 +3,24 @@ from __future__ import annotations
 
 import pytest
 
+from lexis_markets.config import EOD_CHUNK_SIZE_DEFAULT, EOD_START_SLOP_DAYS_DEFAULT
 from lexis_markets.domain.gates import YfinanceGate
+
+
+@pytest.mark.unit
+def test_yf_gate_product_ceiling():
+    assert EOD_CHUNK_SIZE_DEFAULT == 250
+    assert EOD_START_SLOP_DAYS_DEFAULT == 365
+    gate = YfinanceGate(
+        2.5,
+        chunk_size=EOD_CHUNK_SIZE_DEFAULT,
+        min_chunk_size=30,
+        start_slop_days=EOD_START_SLOP_DAYS_DEFAULT,
+        min_start_slop_days=30,
+    )
+    knobs = gate.batch_knobs()
+    assert knobs["chunk_size"] == 250
+    assert knobs["start_slop_days"] == 365
 
 
 @pytest.mark.unit
@@ -115,3 +132,27 @@ def test_run_yf_remaining_keeps_sibling_date_ranges():
     remaining = [t for t in targets if (t["series_id"], t["start"], t["end"]) not in done]
     assert len(remaining) == len(targets) - len(wave[0]["targets"])
     assert any(t["series_id"] == "equity:AAA" for t in remaining)
+
+
+@pytest.mark.unit
+def test_batch_yf_jobs_365d_slop_packs_spread_starts():
+    from datetime import date
+
+    from lexis_markets.eod.ingest import _batch_yf_jobs
+
+    targets = [
+        {
+            "series_id": f"equity:S{i}",
+            "yf_sym": f"S{i}",
+            "symbol": f"S{i}",
+            "series_type": "equity",
+            "start": date(2020, 1, 1) if i % 2 == 0 else date(2020, 6, 1),
+            "end": date(2024, 12, 31),
+        }
+        for i in range(8)
+    ]
+    tight = _batch_yf_jobs(targets, chunk_size=400, start_slop_days=30)
+    wide = _batch_yf_jobs(targets, chunk_size=400, start_slop_days=365)
+    assert len(wide) == 1
+    assert len(wide[0]["targets"]) == 8
+    assert len(tight) > 1
