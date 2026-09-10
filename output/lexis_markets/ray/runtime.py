@@ -43,6 +43,7 @@ WORKER_PIP = [
 RUNTIME_EXCLUDES = [
     "cli/**", "**/__pycache__/**", "**/*.pyc", "**/*.png", "**/*.log", "**/*.csv",
     ".supervisor/**", ".pytest_cache/**", "tests/**", "l1_inspect/**", "plot_samples/**",
+    ".venv/**", "deploy/**", "Dockerfile", "docker-compose.yml", "requirements*.txt",
 ]
 
 

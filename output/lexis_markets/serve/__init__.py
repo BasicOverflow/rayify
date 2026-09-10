@@ -1,1 +1,1 @@
-"""Ray Serve API for Lexis Markets v4."""
+"""Ray Serve API for Lexis Markets."""

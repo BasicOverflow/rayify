@@ -24,7 +24,7 @@ from lexis_markets.lake.local import LocalDirLake
 from lexis_markets.lake.store import LakeStore
 from lexis_markets.logging_setup import get_logger
 from lexis_markets.ray.runtime import IO_REMOTE_OPTS
-from lexis_markets.tmp_scratch import mark_live
+from lexis_markets.scratch import mark_live
 
 logger = get_logger("lake.cluster")
 

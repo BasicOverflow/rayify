@@ -1,4 +1,4 @@
-"""Environment-backed configuration for Lexis Markets v4.
+"""Environment-backed configuration for Lexis Markets.
 
 Loads cluster credentials and tuning knobs from the repo root ``.env``.
 Layer paths (L1 lake, L3 cache/outputs) and Serve route names live here.

@@ -19,7 +19,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from lexis_markets.ray.runtime import OPS_REMOTE_OPTS
 from lexis_markets.lake import LakeStore, PgClient, delete_prefix, month_prefix
-from lexis_markets.tmp_scratch import prune_orphan_tmp_dirs, dir_bytes
+from lexis_markets.scratch import prune_orphan_tmp_dirs, dir_bytes
 from lexis_markets.kaggle.ingest import (
     JC_CACHE_KEY,
     JC_STAGING,

@@ -214,8 +214,11 @@ output/.supervisor/*
 !output/.supervisor/.gitkeep
 output/.supervisor-test/
 output/output/
+output/deploy/secrets.env
 
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+_gitea_lexis_markets/

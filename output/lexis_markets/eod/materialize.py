@@ -27,7 +27,7 @@ from lexis_markets.lake import LakeStore, PgClient, write_parquet_lake, open_lak
 from lexis_markets.lake.cluster import _parquet_bytes, _read_parquet_bytes
 from lexis_markets.logging_setup import get_logger
 from lexis_markets.ray.runtime import CPU_REMOTE_OPTS
-from lexis_markets.tmp_scratch import mark_live
+from lexis_markets.scratch import mark_live
 from lexis_markets.registry import merge_spans, update_cache_meta
 from lexis_markets.serve.cache import l1_fingerprint
 from lexis_markets.serve.quality_persist import apply_quality_updates, quality_update_tuple

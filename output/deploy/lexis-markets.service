@@ -1,0 +1,21 @@
+[Unit]
+Description=Lexis Markets supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lexis
+Group=lexis
+WorkingDirectory=/opt/lexis-markets
+EnvironmentFile=/etc/lexis-markets.env
+Environment=PYTHONPATH=/opt/lexis-markets
+Environment=MARKETS_SUPERVISOR_STATE=/var/lib/lexis-markets/state.db
+ExecStart=/opt/lexis-markets/.venv/bin/python -m lexis_markets.supervisor.main
+Restart=on-failure
+RestartSec=10
+# Ray + seed can be long-lived; do not kill on stop too aggressively
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

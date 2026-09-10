@@ -1,4 +1,4 @@
-# Lexis Markets v4
+# Lexis Markets
 
 Ray cluster datalake + Serve API. Namespace: `lexis-markets` (from root `.env`).
 
@@ -11,6 +11,10 @@ Ray cluster datalake + Serve API. Namespace: `lexis-markets` (from root `.env`).
 - L3 outputs: `layer_3/outputs/{job_id}/`
 
 ## Run (production supervisor)
+
+**Prod (home-media LXC):** paste-install from Gitea `admin/lexis-markets` — see `deploy/install.sh`.
+
+**Local / laptop test (Docker):**
 
 ```bash
 cd output
@@ -84,37 +88,6 @@ Swagger: `{RAY_SERVE_URL}/docs`
 
 Serve deploys on supervisor startup and seed.
 
-## Env (optional)
+## LXC deploy
 
-| Key | Default | Purpose |
-|-----|---------|---------|
-| `EOD_PACE_SECONDS` | 2.5 | Floor spacing (seconds) between yfinance calls; gate starts here and backs off on 429 |
-| `YF_PACE_MAX_SECONDS` | 30.0 | Ceiling spacing after rate-limit backoff |
-| `YF_PACE_BACKOFF_FACTOR` | 2.0 | Multiply current interval on 429 |
-| `YF_PACE_RECOVERY_STEP` | 0.1 | Seconds shaved off interval after each successful download |
-| `EOD_CHUNK_SIZE` | 400 | Opening symbols per bulk `yf.download`; halves on 429 down to `EOD_CHUNK_SIZE_MIN` |
-| `EOD_CHUNK_SIZE_MIN` | 30 | Floor chunk size after rate-limit shrink |
-| `EOD_START_SLOP_DAYS` | 365 | Opening start-date slop for packing jobs; halves on 429 |
-| `EOD_START_SLOP_DAYS_MIN` | 30 | Floor start slop after rate-limit shrink |
-| `YF_WAVE_JOBS` | 8 | Jobs per adaptive re-batch wave when `EOD_MAX_IN_FLIGHT` is 0 |
-| `MARKETS_DEV_YF_LIMIT` | — | Hash-sample jakewright symbols (dev only; leave unset for full universe) |
-| `MARKETS_DEV_FRED_LIMIT` | — | Hash-sample FRED series in seed backfill, macro EOD, and fred_backfill CLI |
-| `MARKETS_DEV_FRED_SEED` | 0 | Stable hash seed for FRED dev sampling |
-| `MARKETS_EOD_DELAY_HOURS` | 3 | Hours after 16:00 ET before EOD cron |
-| `MARKETS_SUPERVISOR_STATE` | `output/.supervisor/state.db` | SQLite path |
-| `FRED_PACE_PER_MINUTE` | 120 | Cluster-wide FRED HTTP cap (requests/min via gate actor) |
-| `FRED_MAX_IN_FLIGHT` | 28 | Max concurrent FRED ingest Ray tasks (one series each) |
-| `FRED_SERIES_PER_TASK` | 1 | Series processed serially inside each FRED Ray task |
-| `FRED_VINTAGE_START` | 1970-01-01 | Earliest vintage/observation date for macro backfill |
-| `FRED_VINTAGE_MIN_DAYS` | 31 | Adaptive ALFRED bisect / window-sizer floor |
-| `FRED_VINTAGE_MAX_WINDOW_DAYS` | 1825 | Opening pack size (~5y); shrinks on gateway bisects, grows after clean fetches |
-| `LOG_LEVEL` | INFO | Python logging |
-| `QUALITY_INLINE_REPAIR` | 1 | L3 write applies trim/OHLC/quarantine/halt rewrite (0 = score-only) |
-
-Default FRED macro set: **117 series** in `config.DEFAULT_FRED_SERIES` (rates, credit, inflation, labor, FX, equities/vol, energy, commodities). No H.15 release bulk — list is explicit.
-
-## Verification
-
-- Import: `PYTHONPATH=output py -3 -c "import lexis_markets"`
-- Build: `cd output && docker compose build supervisor`
-- Cluster smoke: test CLIs above against live `.env` (not run in CI here)
+`deploy/` paste-installs a Proxmox LXC on the home-media node: creates CT 117 (`lexis-markets-supervisor`), pulls this repo, installs Python via uv, drops cluster `.env` from private creds, and starts `lexis-markets.service`. Runtime is Python + systemd only (no Docker in the CT). Details and one-liner: [`deploy/README.md`](deploy/README.md).
