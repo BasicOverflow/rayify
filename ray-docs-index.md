@@ -33,6 +33,19 @@ Foundation for distributed Python: tasks, actors, objects, scheduling, fault tol
 
 ---
 
+## Homelab: ray-hive (local package)
+
+Not upstream Ray — shared cluster toolkit on this lab. Prefer these before inventing new envelopes/queues.
+
+| Piece | When | Doc |
+|---|---|---|
+| Jobs primitives | Fan-out, RateGate, DurableJobQueue, CronSchedule, admission | [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) |
+| vLLM Serve | LLM / embed replicas | same README + `examples/` |
+| Train / custom infer | PyTorch/HF TrainJob, `gpu_remote` | `ray-hive[train]` section in README |
+| Meta-supervisor | Cron board + claims GC | Homelab `projects/ray-hive/Jobs-and-meta-supervisor.md` |
+
+---
+
 ## Ray Libraries
 
 Higher-level APIs for data, training, tuning, serving, RL, and LLM workloads.

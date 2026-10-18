@@ -69,6 +69,6 @@ See [AGENTS.md](AGENTS.md) for agent rules. See [`.env.example`](.env.example) f
 - **ray-docs-index.md**: Ray doc links for agents (web-search the linked pages)
 - **unslop-examples/**: Anti-slop patterns agents must follow
 - **orchestration-patterns/**: Docker Compose + remote-state patterns for packaged jobs
-- **[ray-hive](https://github.com/BasicOverflow/ray-hive)**: Optional LLM serving SDK used on the Ray cluster
+- **[ray-hive](https://github.com/BasicOverflow/ray-hive)**: Shared Ray toolkit — jobs primitives (fan-out, gates, durable queues, cron board), optional vLLM Serve, optional Train. Not vLLM-only.
 
 **Note**: This repository is designed to guide coding agents in performing conversions, not to automate the conversion process. The conversion is a manual process guided by the comprehensive resources and instructions provided.

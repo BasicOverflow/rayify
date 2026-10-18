@@ -167,7 +167,7 @@ Three layers, in order:
 
 | Capability | When | Rule |
 |---|---|---|
-| **Ray Hive** | High-throughput LLM serving (vLLM), embeddings, multimodal | Ask before using. Web-search [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) and crib [examples](https://github.com/BasicOverflow/ray-hive/tree/main/examples). Install via Gitea PyPI keys from `.env`. |
+| **Ray Hive** | Shared-cluster jobs + optional vLLM + optional Train | Ask before using. Prefer hive **jobs** primitives (envelopes, BatchFanout, RateGate, DurableJobQueue, CronSchedule, …) for gated IO/CPU/cron work; **`[vllm]`** for LLM/embed Serve; **`[train]`** for custom PyTorch/HF. Read [ray-hive README](https://github.com/BasicOverflow/ray-hive/blob/main/README.md) primitive examples. Install via Gitea PyPI keys from `.env` (`ray-hive[jobs]`, `ray-hive[vllm]`, `ray-hive[train]` as needed). |
 | **cudf.pandas** | Heavy single-node DataFrame work on GPU workers | Ask first. Not the default — prefer plain pandas or [Ray Data](https://docs.ray.io/en/latest/data/data.html) for distributed/out-of-core. |
 | **W&B or similar** | Training/ML experiment tracking | Ask first. Project-local env keys under `output/` only. |
 
